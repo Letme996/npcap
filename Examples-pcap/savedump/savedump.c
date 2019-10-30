@@ -6,7 +6,27 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
-#include "pcap.h"
+#include <pcap.h>
+
+#ifdef WIN32
+#include <tchar.h>
+BOOL LoadNpcapDlls()
+{
+	_TCHAR npcap_dir[512];
+	UINT len;
+	len = GetSystemDirectory(npcap_dir, 480);
+	if (!len) {
+		fprintf(stderr, "Error in GetSystemDirectory: %x", GetLastError());
+		return FALSE;
+	}
+	_tcscat_s(npcap_dir, 512, _T("\\Npcap"));
+	if (SetDllDirectory(npcap_dir) == 0) {
+		fprintf(stderr, "Error in SetDllDirectory: %x", GetLastError());
+		return FALSE;
+	}
+	return TRUE;
+}
+#endif
 
 /* prototype of the packet handler */
 void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data);
@@ -21,6 +41,15 @@ int main(int argc, char **argv)
 	char errbuf[PCAP_ERRBUF_SIZE];
 	pcap_dumper_t *dumpfile;
 	
+#ifdef WIN32
+	/* Load Npcap and its functions. */
+	if (!LoadNpcapDlls())
+	{
+		fprintf(stderr, "Couldn't load Npcap\n");
+		exit(1);
+	}
+#endif
+
 
     /* Check command line */
 	if(argc != 2)
@@ -48,7 +77,7 @@ int main(int argc, char **argv)
 
     if(i==0)
     {
-        printf("\nNo interfaces found! Make sure WinPcap is installed.\n");
+        printf("\nNo interfaces found! Make sure Npcap is installed.\n");
         return -1;
     }
     
@@ -76,7 +105,7 @@ int main(int argc, char **argv)
 							 errbuf			// error buffer
 							 )) == NULL)
 	{
-		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", d->name);
+		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by Npcap\n", d->name);
 		/* Free the device list */
 		pcap_freealldevs(alldevs);
 		return -1;

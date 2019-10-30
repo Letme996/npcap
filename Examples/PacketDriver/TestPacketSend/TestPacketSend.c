@@ -35,10 +35,28 @@
 #include <conio.h>
 #include <time.h>
 
-#include "..\..\..\Include\packet32.h"
+#include <Packet32.h>
 
 
 #define Max_Num_Adapter 10
+
+#include <tchar.h>
+BOOL LoadNpcapDlls()
+{
+	TCHAR npcap_dir[512];
+	UINT len;
+	len = GetSystemDirectory(npcap_dir, 480);
+	if (!len) {
+		fprintf(stderr, "Error in GetSystemDirectory: %x", GetLastError());
+		return FALSE;
+	}
+	_tcscat_s(npcap_dir, 512, TEXT("\\Npcap"));
+	if (SetDllDirectory(npcap_dir) == 0) {
+		fprintf(stderr, "Error in SetDllDirectory: %x", GetLastError());
+		return FALSE;
+	}
+	return TRUE;
+}
 
 // Prototypes
 
@@ -72,6 +90,13 @@ ULONG		AdapterLength;
 
 float	cpu_time;
 	
+	/* Load Npcap and its functions. */
+	if (!LoadNpcapDlls())
+	{
+		fprintf(stderr, "Couldn't load Npcap\n");
+		exit(1);
+	}
+
 	printf("Traffic Generator v 0.9999\nCopyright 1999 Loris Degioanni (loris@netgroup-serv.polito.it)");
 	printf("\nSends a set of packets to the network using packet.dll API.\n");
 	
@@ -91,7 +116,7 @@ float	cpu_time;
 		{
 			
 		case 'i':
-			sscanf_s(argv[i+1],"%s",AdapterName);
+			sscanf_s(argv[i+1],"%s",AdapterName, (unsigned)_countof(AdapterName));
 			break;
 			
 		case 'n':

@@ -2,6 +2,7 @@
 #include <stdio.h>
 
 #include <pcap.h>
+#include "misc.h"
 
 
 void main(int argc, char **argv)
@@ -10,6 +11,13 @@ pcap_t *fp;
 char errbuf[PCAP_ERRBUF_SIZE];
 u_char packet[100];
 int i;
+
+    /* Load Npcap and its functions. */
+    if (!LoadNpcapDlls())
+    {
+        fprintf(stderr, "Couldn't load Npcap\n");
+        exit(1);
+    }
 
 	/* Check the validity of the command line */
 	if (argc != 2)
@@ -27,7 +35,7 @@ int i;
 						errbuf				// error buffer
 						) ) == NULL)
 	{
-		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", argv[1]);
+		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by Npcap\n", argv[1]);
 		return;
 	}
 

@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -97,13 +97,6 @@
 #include "jitter.h"
 #endif
 
-#ifdef HAVE_BUGGY_TME_SUPPORT
-#ifndef _X86_
-#error TME support is available only on x86 architectures
-#endif // _X86_
-#endif //HAVE_BUGGY_TME_SUPPORT
-
-
 #include "win_bpf.h"
 
 #define FILTER_ACQUIRE_LOCK(_pLock, DispatchLevel) NdisAcquireSpinLock(_pLock)
@@ -134,11 +127,30 @@ extern NDIS_HANDLE         FilterDriverObject;
 
 #define NDIS_FLAGS_SKIP_LOOPBACK_W2K		0x400 ///< This is an undocumented flag for NdisSetPacketFlags() that allows to disable loopback reception.
 
+#ifdef NPCAP_KDUMP
 // The following definitions are used to provide compatibility
 // of the dump files with the ones of libpcap
 #define TCPDUMP_MAGIC						0xa1b2c3d4	///< Libpcap magic number. Used by programs like tcpdump to recognize a driver's generated dump file.
 #define PCAP_VERSION_MAJOR					2			///< Major libpcap version of the dump file. Used by programs like tcpdump to recognize a driver's generated dump file.
 #define PCAP_VERSION_MINOR					4			///< Minor libpcap version of the dump file. Used by programs like tcpdump to recognize a driver's generated dump file.
+
+/*!
+  \brief Header of a libpcap dump file.
+
+  Used when a driver instance is set in dump mode to create a libpcap-compatible file.
+*/
+struct packet_file_header
+{
+	UINT	magic;			///< Libpcap magic number
+	USHORT	version_major;	///< Libpcap major version
+	USHORT	version_minor;	///< Libpcap minor version
+	UINT	thiszone;		///< Gmt to local correction
+	UINT	sigfigs;		///< Accuracy of timestamps
+	UINT	snaplen;		///< Length of the max saved portion of each packet
+	UINT	linktype;		///< Data link type (DLT_*). See win_bpf.h for details.
+};
+
+#endif //NPCAP_KDUMP
 
 // Loopback behaviour definitions
 #define NPF_DISABLE_LOOPBACK				1	///< Tells the driver to drop the packets sent by itself. This is usefult when building applications like bridges.
@@ -159,7 +171,7 @@ extern NDIS_HANDLE         FilterDriverObject;
 #define NdisMediumPpi						-6		///< Custom linktype: NDIS doesn't provide an equivalent
 
 // Maximum CPU core number, the original value is sizeof(KAFFINITY) * 8, but Amazon instance can return 128 cores, so we make NPF_MAX_CPU_NUMBER to 256 for safe.
-#define NPF_MAX_CPU_NUMBER					sizeof(KAFFINITY) * 32
+#define NPF_MAX_CPU_NUMBER					(sizeof(KAFFINITY) * 32)
 
 // The length of the adapter name
 #define ADAPTER_NAME_SIZE					(sizeof("\\Device\\{754FC84C-EFBC-4443-B479-2EFAE01DC7BF}") - 1)
@@ -181,22 +193,6 @@ extern NDIS_HANDLE         FilterDriverObject;
 
 // Maximum pool size allowed in bytes (defence against bad BIOCSETBUFFERSIZE calls)
 #define NPF_MAX_BUFFER_SIZE 0x40000000L
-
-/*!
-  \brief Header of a libpcap dump file.
-
-  Used when a driver instance is set in dump mode to create a libpcap-compatible file.
-*/
-struct packet_file_header
-{
-	UINT	magic;			///< Libpcap magic number
-	USHORT	version_major;	///< Libpcap major version
-	USHORT	version_minor;	///< Libpcap minor version
-	UINT	thiszone;		///< Gmt to local correction
-	UINT	sigfigs;		///< Accuracy of timestamps
-	UINT	snaplen;		///< Length of the max saved portion of each packet
-	UINT	linktype;		///< Data link type (DLT_*). See win_bpf.h for details.
-};
 
 /*!
   \brief Header associated to a packet in the driver's buffer when the driver is in dump mode.
@@ -257,26 +253,6 @@ typedef struct _INTERNAL_REQUEST
 } INTERNAL_REQUEST, *PINTERNAL_REQUEST;
 
 /*!
-  \brief Contains a NDIS packet.
-
-  The driver uses this structure to wrap a NDIS_PACKET  structure.
-  This allows to handle correctly the callback structure of NdisTransferData(), handling multiple requests and
-  maintaining information about the IRPs to complete.
-*/
-typedef struct _PACKET_RESERVED
-{
-	LIST_ENTRY	ListElement;		///< Used to handle lists of packets. ((NO USE!!)
-	BOOLEAN		FreeBufAfterWrite;	///< True if the memory buffer associated with the packet must be freed.
-	PVOID		ChildOpen;			///< The child open pointer that binded the group head open.
-	PIRP		Irp;				///< Irp that performed the request.
-	// PMDL		pMdl;				///< MDL mapping the buffer of the packet. (NO USE!! also no space for this variable)
-									///< after a call to NdisSend().
-	// ULONG	Cpu;				///< The CPU on which the packet was pulled out of the linked list of free packets (NO USE!! also no space for this variable)
-}  PACKET_RESERVED, *PPACKET_RESERVED;
-
-#define RESERVED(_p) ((PPACKET_RESERVED)((_p)->ProtocolReserved)) ///< Macro to obtain a NDIS_PACKET from a PACKET_RESERVED
-
-/*!
   \brief Port device extension.
 
   Structure containing some data relative to every adapter on which NPF is bound.
@@ -319,17 +295,35 @@ typedef struct __CPU_Private_Data
 } CpuPrivateData;
 
 
-/*!
-  \brief Contains the state of a running instance of the NPF driver.
-
-  This is the most important structure of NPF: it is used by almost all the functions of the driver. An
-  _OPEN_INSTANCE structure is associated with every user-level session, allowing concurrent access
-  to the driver.
-*/
-typedef struct _OPEN_INSTANCE
+typedef enum _FILTER_STATE
 {
+    FilterStateUnspecified,
+    FilterInitialized,
+    FilterAttaching,
+    FilterPausing,
+    FilterPaused,
+    FilterRunning,
+    FilterRestarting,
+    FilterDetaching,
+    FilterDetached
+} FILTER_STATE;
+
+typedef enum _OPEN_STATE
+{
+	OpenRunning,
+	OpenClosing,
+	OpenClosed
+} OPEN_STATE;
+
+#define OPEN_SIGNATURE 'NPFO'
+
+/* Filter module (per-adapter) */
+typedef struct _NPCAP_FILTER_MODULE
+{
+	SINGLE_LIST_ENTRY FilterModulesEntry;
+    SINGLE_LIST_ENTRY OpenInstances; //GroupHead
+    NDIS_SPIN_LOCK OpenInstancesLock; // GroupLock
 	NDIS_STRING				AdapterName;
-	BOOLEAN					DirectBinded;
 #ifdef HAVE_WFP_LOOPBACK_SUPPORT
 	BOOLEAN					Loopback;
 #endif
@@ -341,11 +335,6 @@ typedef struct _OPEN_INSTANCE
 	BOOLEAN					HasDataRateMappingTable;
 	DOT11_DATA_RATE_MAPPING_TABLE	DataRateMappingTable;
 #endif
-
-	struct _OPEN_INSTANCE	*Next;
-	struct _OPEN_INSTANCE	*GroupNext;
-	struct _OPEN_INSTANCE	*GroupHead;
-	NDIS_SPIN_LOCK GroupLock;
 
 	ULONG					MyPacketFilter;
 	ULONG					HigherPacketFilter;
@@ -359,17 +348,32 @@ typedef struct _OPEN_INSTANCE
 	NDIS_SPIN_LOCK			OIDLock;		///< Lock for protection of state and outstanding sends and recvs
 	PNDIS_OID_REQUEST		PendingOidRequest;
 
-	PDEVICE_EXTENSION		DeviceExtension;///< Pointer to the _DEVICE_EXTENSION structure of the device on which
-											///< the instance is bound.
 	NDIS_HANDLE				AdapterHandle;	///< NDIS idetifier of the adapter used by this instance.
 	UINT					Medium;			///< Type of physical medium the underlying NDIS driver uses. See the
 											///< documentation of NdisOpenAdapter in the MS DDK for details.
 	NDIS_HANDLE				PacketPool;		///< Pool of NDIS_PACKET structures used to transfer the packets from and to the NIC driver.
 	KSPIN_LOCK				RequestSpinLock;///< SpinLock used to synchronize the OID requests.
 	LIST_ENTRY				RequestList;	///< List of pending OID requests.
-	LIST_ENTRY				ResetIrpList;	///< List of pending adapter reset requests.
 	INTERNAL_REQUEST		Requests[MAX_REQUESTS]; ///< Array of structures that wrap every single OID request.
-	PMDL					BufferMdl;		///< Pointer to a Memory descriptor list (MDL) that maps the circular buffer's memory.
+	UINT					MaxFrameSize;	///< Maximum frame size that the underlying MAC acceptes. Used to perform a check on the
+											///< size of the frames sent with NPF_Write() or NPF_BufferedWrite().
+	ULONG					AdapterHandleUsageCounter;
+	NDIS_SPIN_LOCK			AdapterHandleLock;
+	FILTER_STATE					AdapterBindingStatus;	///< Specifies if NPF is still bound to the adapter used by this instance, it's unbinding or it's not bound.
+
+} 
+NPCAP_FILTER_MODULE, *PNPCAP_FILTER_MODULE;
+
+/* Open instance
+ * Represents an open device handle by a process
+ */
+typedef struct _OPEN_INSTANCE
+{
+	ULONG OpenSignature;
+    SINGLE_LIST_ENTRY OpenInstancesEntry; //GroupNext
+    PNPCAP_FILTER_MODULE pFiltMod;
+
+	ULONG					MyPacketFilter;
 	PKEVENT					ReadEvent;		///< Pointer to the event on which the read calls on this instance must wait.
 	PUCHAR					bpfprogram;		///< Pointer to the filtering pseudo-code associated with current instance of the driver.
 											///< This code is used only in particular situations (for example when the packet received
@@ -384,7 +388,6 @@ typedef struct _OPEN_INSTANCE
 											///< BIOCSMINTOCOPY IOCTL.
 	LARGE_INTEGER			TimeOut;		///< Timeout after which a read is released, also if the amount of data in the buffer is
 											///< less than MinToCopy. Set with the BIOCSRTIMEOUT IOCTL.
-
 	int						mode;			///< Working mode of the driver. See PacketSetMode() for details.
 	LARGE_INTEGER			Nbytes;			///< Amount of bytes accepted by the filter when this instance is in statistical mode.
 	LARGE_INTEGER			Npackets;		///< Number of packets accepted by the filter when this instance is in statistical mode.
@@ -396,9 +399,9 @@ typedef struct _OPEN_INSTANCE
 	BOOLEAN					WriteInProgress;///< True if a write is currently in progress. NPF currently allows a single wite on
 											///< the same open instance.
 	NDIS_SPIN_LOCK			WriteLock;		///< SpinLock that protects the WriteInProgress variable.
-	NDIS_EVENT				NdisRequestEvent;	///< Event used to synchronize I/O requests with the callback structure of NDIS.
+
 	BOOLEAN					SkipSentPackets;	///< True if this instance should not capture back the packets that it transmits.
-	NDIS_STATUS				IOStatus;		///< Maintains the status of and OID request call, that will be passed to the application.
+#ifdef NPCAP_KDUMP
 	HANDLE					DumpFileHandle;	///< Handle of the file used in dump mode.
 	PFILE_OBJECT			DumpFileObject;	///< Pointer to the object of the file used in dump mode.
 	PKTHREAD				DumpThreadObject;	///< Pointer to the object of the thread used in dump mode.
@@ -413,14 +416,9 @@ typedef struct _OPEN_INSTANCE
 											///< packets.
 	BOOLEAN					DumpLimitReached;	///< TRUE if the maximum dimension of the dump file (MaxDumpBytes or MaxDumpPacks) is
 											///< reached.
-#ifdef HAVE_BUGGY_TME_SUPPORT
-	MEM_TYPE				mem_ex;			///< Memory used by the TME virtual co-processor
-	TME_CORE				tme;			///< Data structure containing the virtualization of the TME co-processor
-#endif//HAVE_BUGGY_TME_SUPPORT
+#endif
 
 	NDIS_SPIN_LOCK			MachineLock;	///< SpinLock that protects the BPF filter and the TME engine, if in use.
-	UINT					MaxFrameSize;	///< Maximum frame size that the underlying MAC acceptes. Used to perform a check on the
-											///< size of the frames sent with NPF_Write() or NPF_BufferedWrite().
 	//
 	// KAFFINITY is used as a bit mask for the affinity in the system. So on every supported OS is big enough for all the CPUs on the system (32 bits on x86, 64 on x64?).
 	// We use its size to compute the max number of CPUs.
@@ -430,27 +428,26 @@ typedef struct _OPEN_INSTANCE
 	ULONG					WriterSN;		///< Sequence number of the next packet to be written in the pool of kernel buffers.
 											///< These two sequence numbers are unique for each capture instance.
 	ULONG					Size;			///< Size of each kernel buffer contained in the CpuData field.
-	ULONG					AdapterHandleUsageCounter;
-	NDIS_SPIN_LOCK			AdapterHandleLock;
-	ULONG					AdapterBindingStatus;	///< Specifies if NPF is still bound to the adapter used by this instance, it's unbinding or it's not bound.
-
-	NDIS_EVENT				NdisOpenCloseCompleteEvent;
 	NDIS_EVENT				NdisWriteCompleteEvent;	///< Event that is signalled when all the packets have been successfully sent by NdisSend (and corresponfing sendComplete has been called)
-	NTSTATUS				OpenCloseStatus;
 	ULONG					TransmitPendingPackets;	///< Specifies the number of packets that are pending to be transmitted, i.e. have been submitted to NdisSendXXX but the SendComplete has not been called yet.
 	ULONG					NumPendingIrps;
-	BOOLEAN					ClosePending;
-	BOOLEAN					PausePending;
+
+	OPEN_STATE OpenStatus;
 	NDIS_SPIN_LOCK			OpenInUseLock;
-}
+
+} 
 OPEN_INSTANCE, *POPEN_INSTANCE;
 
-enum ADAPTER_BINDING_STATUS
+/*!
+\brief Context information for originated sent packets
+*/
+typedef struct _PACKET_RESERVED
 {
-	ADAPTER_UNBOUND,
-	ADAPTER_BOUND,
-	ADAPTER_UNBINDING,
-};
+	BOOLEAN		FreeBufAfterWrite;	///< True if the memory buffer associated with the packet must be freed.
+	POPEN_INSTANCE		ChildOpen;			///< The child open pointer that binded the group head open.
+}  PACKET_RESERVED, *PPACKET_RESERVED;
+
+#define RESERVED(_p) ((PPACKET_RESERVED)((_p)->Context->ContextData + (_p)->Context->Offset)) ///< Macro to obtain a NDIS_PACKET from a PACKET_RESERVED
 
 /*!
   \brief Structure prepended to each packet in the kernel buffer pool.
@@ -1019,7 +1016,7 @@ DRIVER_DISPATCH NPF_OpenAdapter;
   This function is called when a running instance of the driver is closed by the user with a CloseHandle().
   Used together with NPF_CloseAdapter().
   It stops the capture/monitoring/dump process, deallocates the memory and the objects associated with the
-  instance and closing the files. The network adapter is then closed with a call to NdisCloseAdapter.
+  instance and closing the files.
 */
 _Dispatch_type_(IRP_MJ_CLEANUP)
 DRIVER_DISPATCH NPF_Cleanup;
@@ -1164,7 +1161,7 @@ NPF_WaitEndOfBufferedWrite(
 
 /*!
   \brief Ends a send operation.
-  \param Open Pointer to open context structure.
+  \param pFiltMod Pointer to filter module context structure
   \param FreeBufAfterWrite Whether the buffer should be freed.
 
   Callback function associated with the NdisFSend() NDIS function. It is invoked by NPF_SendCompleteEx() when the NIC
@@ -1186,7 +1183,7 @@ NPF_SendCompleteExForEachOpen(
 */
 VOID
 NPF_LoopbackSendNetBufferLists(
-	IN POPEN_INSTANCE Open,
+	IN NDIS_HANDLE FilterModuleContext,
 	IN PNET_BUFFER_LIST NetBufferList
 	);
 #endif
@@ -1238,59 +1235,59 @@ DRIVER_DISPATCH NPF_Read;
 
 
 /*!
-  \brief Add the open context to the global open array.
-  \param Open Pointer to open context structure.
+  \brief Add the filter module context to the global filter module array.
+  \param pFiltMod Pointer to filter module context structure.
 
   This function is used by NPF_AttachAdapter() and NPF_OpenAdapter() to add a new open context to
   the global open array, this array is designed to help find and clean the specific adapter context.
 */
 void
-NPF_AddToOpenArray(
-	POPEN_INSTANCE Open
+NPF_AddToFilterModuleArray(
+	PNPCAP_FILTER_MODULE pFiltMod
 	);
 
 
 /*!
-  \brief Add the open context to the group open array of a head adapter.
-  \param Open Pointer to open context structure.
+  \brief Add the open context to the group open array of a filter module.
+  \param pOpen Pointer to open context structure.
+  \param pFiltMod Pointer to filter module context structure.
 
   This function is used by NPF_OpenAdapter to add a new open context to
-  the group open array of a head adapter, this array is designed to help find and clean the specific adapter context.
-  A head adapter context is generated by NPF_AttachAdapter(), it handles with NDIS.
-  A non-head adapter is generated by NPF_OpenAdapter(), it handles with the WinPcap
-  up-level packet.dll and so on. Head adapter contexts are designed because NDIS 6.x
-  only allows one-time binding, unlike NDIS 5.0.
+  the group open array of a filter module, this array is designed to help find and clean the specific adapter context.
+  A filter module context is generated by NPF_AttachAdapter(), it handles with NDIS.
+  A open instance is generated by NPF_OpenAdapter(), it handles with the WinPcap
+  up-level packet.dll and so on.
 */
 void
 NPF_AddToGroupOpenArray(
-	POPEN_INSTANCE Open,
-	POPEN_INSTANCE GroupHead
+	POPEN_INSTANCE pOpen,
+	PNPCAP_FILTER_MODULE pFiltMod
 	);
 
 
 /*!
-  \brief Remove the open context from the global open array.
-  \param Open Pointer to open context structure.
+  \brief Remove the filter module context from the global filter module array.
+  \param pFiltMod Pointer to filter module context structure.
 
   This function is used by NPF_DetachAdapter(), NPF_Cleanup() and NPF_CleanupForUnclosed()
-  to remove an open context from the global open array.
+  to remove a filter module context from the global filter module array.
 */
 void
-NPF_RemoveFromOpenArray(
-	POPEN_INSTANCE Open
+NPF_RemoveFromFilterModuleArray(
+	PNPCAP_FILTER_MODULE pFiltMod
 	);
 
 
 /*!
-  \brief Remove the open context from the group open array of a head adapter.
-  \param Open Pointer to open context structure.
+  \brief Remove the open context from the group open array of a filter module.
+  \param pOpen Pointer to open context structure.
 
   This function is used by NPF_Cleanup() and NPF_CleanupForUnclosed()
-  to remove an open context from the group open array of a head adapter.
+  to remove an open context from the group open array of a filter module.
 */
 void
 NPF_RemoveFromGroupOpenArray(
-	POPEN_INSTANCE Open
+	POPEN_INSTANCE pOpen
 	);
 
 
@@ -1312,52 +1309,49 @@ NPF_EqualAdapterName(
 
 
 /*!
-  \brief Get a copy of open instance from the global array.
-  \param pAdapterName The adapter name of the target open instance.
-  \param DeviceExtension Pointer to the _DEVICE_EXTENSION structure of the device.
-  \return Pointer to the new open instance.
+  \brief Get a pointer to filter module from the global array.
+  \param pAdapterName The adapter name of the target filter module.
+  \return Pointer to the filter module, or NULL if not found.
 
   This function is used to create a group member adapter for the group head one.
 */
-POPEN_INSTANCE
-NPF_GetOpenByAdapterName(
-	PNDIS_STRING pAdapterName,
-	BOOLEAN Dot11
+PNPCAP_FILTER_MODULE
+NPF_GetFilterModuleByAdapterName(
+	PNDIS_STRING pAdapterName
 	);
+
+/*!
+  \brief Get the filter module for the loopback adapter
+  \return Pointer to the loopback filter module.
+ */
+PNPCAP_FILTER_MODULE
+NPF_GetLoopbackFilterModule();
+
+/*!
+  \brief Create a new Open instance
+  \return Pointer to the new open instance.
+
+*/
+POPEN_INSTANCE
+NPF_CreateOpenObject();
 
 
 /*!
-  \brief Get a copy of open instance from the global array.
-  \param OriginalOpen The open instance need to be copied.
-  \param DeviceExtension Pointer to the _DEVICE_EXTENSION structure of the device.
-  \return Pointer to the new open instance.
+  \brief Create a filter module.
+  \param AdapterName The adapter name of the target filter module.
+  \param SelectedIndex The medium of the filter module.
+  \return Pointer to the new filter module.
 
-  This function is used by NPF_GetCopyFromOpenArray().
+  This function is used to create a filter module context object
 */
-POPEN_INSTANCE
-NPF_DuplicateOpenObject(
-	POPEN_INSTANCE OriginalOpen,
-	PDEVICE_EXTENSION DeviceExtension
-	);
-
-
-/*!
-  \brief Create a open instance.
-  \param AdapterName The adapter name of the target open instance.
-  \param SelectedIndex The medium of the open instance.
-  \param DeviceExtension Pointer to the _DEVICE_EXTENSION structure of the device.
-  \return Pointer to the new open instance.
-
-  This function is used to create a group head open instance or a group member open instance.
-*/
-POPEN_INSTANCE
-NPF_CreateOpenObject(
+PNPCAP_FILTER_MODULE
+NPF_CreateFilterModule(
 	PNDIS_STRING AdapterName,
-	UINT SelectedIndex,
-	PDEVICE_EXTENSION DeviceExtension
+	UINT SelectedIndex
 	);
 
 
+#ifdef NPCAP_KDUMP
 /*!
   \brief Creates the file that will receive the packets when the driver is in dump mode.
   \param Open The NPF instance that opens the file.
@@ -1419,13 +1413,15 @@ VOID NPF_WriteDumpFile(PFILE_OBJECT FileObject, PLARGE_INTEGER Offset, ULONG Len
   \return The status of the operation. See ntstatus.h in the DDK.
 */
 NTSTATUS NPF_CloseDumpFile(POPEN_INSTANCE Open);
+#endif
 
+BOOLEAN NPF_IsOpenInstance(IN POPEN_INSTANCE pOpen);
 
-BOOLEAN NPF_StartUsingBinding(IN POPEN_INSTANCE pOpen);
+BOOLEAN NPF_StartUsingBinding(IN PNPCAP_FILTER_MODULE pFiltMod);
 
-VOID NPF_StopUsingBinding(IN POPEN_INSTANCE pOpen);
+VOID NPF_StopUsingBinding(IN PNPCAP_FILTER_MODULE pFiltMod);
 
-VOID NPF_CloseBinding(IN POPEN_INSTANCE pOpen);
+VOID NPF_CloseBinding(IN PNPCAP_FILTER_MODULE pFiltMod);
 
 BOOLEAN NPF_StartUsingOpenInstance(IN POPEN_INSTANCE pOpen);
 
@@ -1433,24 +1429,24 @@ VOID NPF_StopUsingOpenInstance(IN POPEN_INSTANCE pOpen);
 
 VOID NPF_CloseOpenInstance(IN POPEN_INSTANCE pOpen);
 
-NTSTATUS NPF_GetDeviceMTU(IN POPEN_INSTANCE pOpen, OUT PUINT  pMtu);
+NTSTATUS NPF_GetDeviceMTU(IN PNPCAP_FILTER_MODULE pFiltMod, OUT PUINT  pMtu);
 
 #ifdef HAVE_DOT11_SUPPORT
-NTSTATUS NPF_GetDataRateMappingTable(IN POPEN_INSTANCE pOpen, OUT PDOT11_DATA_RATE_MAPPING_TABLE pDataRateMappingTable);
+NTSTATUS NPF_GetDataRateMappingTable(IN PNPCAP_FILTER_MODULE pFiltMod, OUT PDOT11_DATA_RATE_MAPPING_TABLE pDataRateMappingTable);
 
-USHORT NPF_LookUpDataRateMappingTable(IN POPEN_INSTANCE pOpen, IN UCHAR ucDataRate);
+USHORT NPF_LookUpDataRateMappingTable(IN PNPCAP_FILTER_MODULE pFiltMod, IN UCHAR ucDataRate);
 
-NTSTATUS NPF_GetCurrentOperationMode(IN POPEN_INSTANCE pOpen, OUT PDOT11_CURRENT_OPERATION_MODE pCurrentOperationMode);
+NTSTATUS NPF_GetCurrentOperationMode(IN PNPCAP_FILTER_MODULE pFiltMod, OUT PDOT11_CURRENT_OPERATION_MODE pCurrentOperationMode);
 
-ULONG NPF_GetCurrentOperationMode_Wrapper(IN POPEN_INSTANCE pOpen);
+ULONG NPF_GetCurrentOperationMode_Wrapper(IN PNPCAP_FILTER_MODULE pFiltMod);
 
-NTSTATUS NPF_GetCurrentChannel(IN POPEN_INSTANCE pOpen, OUT PULONG pCurrentChannel);
+NTSTATUS NPF_GetCurrentChannel(IN PNPCAP_FILTER_MODULE pFiltMod, OUT PULONG pCurrentChannel);
 
-ULONG NPF_GetCurrentOperationMode_Wrapper(IN POPEN_INSTANCE pOpen);
+ULONG NPF_GetCurrentChannel_Wrapper(IN PNPCAP_FILTER_MODULE pFiltMod);
 
-NTSTATUS NPF_GetCurrentFrequency(IN POPEN_INSTANCE pOpen, OUT PULONG pCurrentFrequency);
+NTSTATUS NPF_GetCurrentFrequency(IN PNPCAP_FILTER_MODULE pFiltMod, OUT PULONG pCurrentFrequency);
 
-ULONG NPF_GetCurrentFrequency_Wrapper(IN POPEN_INSTANCE pOpen);
+ULONG NPF_GetCurrentFrequency_Wrapper(IN PNPCAP_FILTER_MODULE pFiltMod);
 #endif
 
 /*!

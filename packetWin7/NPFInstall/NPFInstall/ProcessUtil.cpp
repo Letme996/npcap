@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -215,7 +215,11 @@ BOOL enumDLLs(tstring strProcessName, DWORD dwProcessID)
 // 				if (strProcessName != _T("nmap.exe"))
 // 					continue;
 
-				if (checkModulePathName(strModulePathName) && getFileProductName(strModulePathName) == _T(NPF_DRIVER_NAME_NORMAL))
+				if (checkModulePathName(strModulePathName) && (getFileProductName(strModulePathName) == _T(NPF_DRIVER_NAME_NORMAL)
+#ifdef NPF_NPCAP_RUN_IN_WINPCAP_MODE
+				|| getFileProductName(strModulePathName) == _T("WinPcap")
+#endif
+						))
 				{
 					TRACE_PRINT2("enumDLLs: succeed, strProcessName = %s, strModulePathName = %s.", strProcessName.c_str(), strModulePathName.c_str());
 					// _tprintf(_T("enumDLLs: succeed, strProcessName = %s, strModulePathName = %s.\n"), strProcessName.c_str(), strModulePathName.c_str());
@@ -407,7 +411,10 @@ BOOL killProcess_Soft(DWORD dwProcessID)
 	tstring strCommand = _T("taskkill /pid ");
 	strCommand += itos(dwProcessID);
 
-	tstring strResult = executeCommand((TCHAR*)strCommand.c_str());
+	TCHAR* cmdLine = new TCHAR[(strCommand.length() + 1) * sizeof(TCHAR)];
+	_tcscpy_s(cmdLine, strCommand.length(), (TCHAR*)strCommand.c_str());
+	tstring strResult = executeCommand(cmdLine);
+	delete[] cmdLine;
 
 	if (_tcsncmp(strResult.c_str(), _T("SUCCESS"), _tcslen(_T("SUCCESS"))) == 0)
 	{

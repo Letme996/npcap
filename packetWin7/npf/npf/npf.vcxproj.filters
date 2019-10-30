@@ -1,13 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="count_packets.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="dump.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="functions.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="jitter.c">
@@ -19,9 +13,6 @@
     <ClCompile Include="Loopback.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="normal_lookup.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="Openclos.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -31,36 +22,15 @@
     <ClCompile Include="Read.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="tcp_session.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="tme.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="win_bpf_filter.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="win_bpf_filter_init.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Write.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="bucket_lookup.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="bucket_lookup.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="count_packets.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="DEBUG.H">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="functions.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ieee80211_radiotap.h">
@@ -81,34 +51,19 @@
     <ClInclude Include="macros.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="memory_t.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="normal_lookup.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Packet.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="stdafx.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="tcp_session.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="time_calls.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="tme.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="valid_insns.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="win_bpf.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="win_bpf_filter_init.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

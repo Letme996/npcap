@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -94,12 +94,8 @@
 
 #ifdef WIN_NT_DRIVER
 #include <ndis.h>
-#endif
-
-#ifdef HAVE_BUGGY_TME_SUPPORT
-#include "tme.h"
-#endif 
 #include "time_calls.h"
+#endif
 
 typedef	UCHAR u_char;
 typedef	USHORT u_short;
@@ -409,55 +405,29 @@ extern "C"
 	  This function returns true if f is a valid filter program. The constraints are that each jump be forward and 
 	  to a valid code.  The code must terminate with either an accept or reject. 
 	*/
-#ifdef HAVE_BUGGY_TME_SUPPORT
-	int bpf_validate(struct bpf_insn* f, int len, uint32 mem_ex_size);
-#else //HAVE_BUGGY_TME_SUPPORT
 	int bpf_validate(struct bpf_insn* f, int len);
-#endif //HAVE_BUGGY_TME_SUPPORT
 
 	/*!
 	  \brief The filtering pseudo-machine interpreter.
 	  \param pc The filter.
-	  \param p Pointer to a memory buffer containing the packet on which the filter will be executed.
+	  \param p Pointer to a Memory Descriptor List (MDL) containing the packet on which the filter will be executed.
+	  \param data_offset The offset to the start of the used data space in the NET_BUFFER structure
 	  \param wirelen Original length of the packet.
-	  \param buflen Current length of the packet. In some cases (for example when the transfer of the packet to the RAM
-	  has not yet finished), bpf_filter can be executed on a portion of the packet.
-	  \param mem_ex The extended memory.
-	  \param tme The virtualization of the TME co-processor
-	  \param time_ref Data structure needed by the TME co-processor to timestamp data
 	  \return The portion of the packet to keep, in bytes. 0 means that the packet must be rejected, -1 means that
 	   the whole packet must be kept.
 	  
 	  \note this function is not used in normal situations, because the jitter creates a native filtering function
 	  that is faster than the interpreter.
 	*/
-#ifdef HAVE_BUGGY_TME_SUPPORT
-	u_int bpf_filter(register struct bpf_insn* pc, register UCHAR* p, u_int wirelen, register u_int buflen, PMEM_TYPE mem_ex, PTME_CORE tme, struct time_conv* time_ref);
-#else //HAVE_BUGGY_TME_SUPPORT
-	u_int bpf_filter(register struct bpf_insn* pc, register UCHAR* p, u_int wirelen, register u_int buflen);
-#endif //HAVE_BUGGY_TME_SUPPORT
-	/*!
-	  \brief The filtering pseudo-machine interpreter with two buffers. This function is slower than bpf_filter(), 
-	  but works correctly also if the MAC header and the data of the packet are in two different buffers.
-	  \param pc The filter.
-	  \param p Pointer to a memory buffer containing the MAC header of the packet.
-	  \param pd Pointer to a memory buffer containing the data of the packet.
-	  \param wirelen Original length of the packet.
-	  \param buflen Current length of the packet. In some cases (for example when the transfer of the packet to the RAM
-	  has not yet finished), bpf_filter can be executed on a portion of the packet.
-	  \param mem_ex The extended memory.
-	  \param tme The virtualization of the TME co-processor
-	  \param time_ref Data structure needed by the TME co-processor to timestamp data
-	  \return The portion of the packet to keep, in bytes. 0 means that the packet must be rejected, -1 means that
-	   the whole packet must be kept.
-	  
-	  This function is used when NDIS passes the packet to NPF_tap() in two buffers instaed than in a single one.
-	*/
-#ifdef HAVE_BUGGY_TME_SUPPORT
-	u_int bpf_filter_with_2_buffers(register struct bpf_insn* pc, register u_char* p, register u_char* pd, register int headersize, u_int wirelen, register u_int buflen, PMEM_TYPE mem_ex, PTME_CORE tme, struct time_conv* time_ref);
-#else //HAVE_BUGGY_TME_SUPPORT
-	u_int bpf_filter_with_2_buffers(register struct bpf_insn* pc, register u_char* p, register u_char* pd, register int headersize, u_int wirelen, register u_int buflen);
-#endif
+#ifdef WIN_NT_DRIVER
+	u_int bpf_filter(struct bpf_insn* pc, PMDL p, u_int data_offset, u_int wirelen);
+#else
+	u_int bpf_filter(register struct bpf_insn *pc,
+		register UCHAR *p,
+		u_int wirelen,
+		register u_int buflen);
+#endif //WIN_NT_DRIVER
+
 #ifdef __cplusplus
 }
 #endif

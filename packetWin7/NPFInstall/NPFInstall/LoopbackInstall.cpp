@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -1158,135 +1158,135 @@ int cmdInstall(_In_ LPCTSTR BaseName, _In_opt_ LPCTSTR Machine, _In_ DWORD Flags
 
 Routine Description:
 
-    CREATE
-    Creates a root enumerated devnode and installs drivers on it
+CREATE
+Creates a root enumerated devnode and installs drivers on it
 
 Arguments:
 
-    BaseName  - name of executable
-    Machine   - machine name, must be NULL
-    argc/argv - remaining parameters
+BaseName  - name of executable
+Machine   - machine name, must be NULL
+argc/argv - remaining parameters
 
 Return Value:
 
-    EXIT_xxxx
+EXIT_xxxx
 
 --*/
 {
 	TRACE_ENTER();
 
-    HDEVINFO DeviceInfoSet = INVALID_HANDLE_VALUE;
-    SP_DEVINFO_DATA DeviceInfoData;
-    GUID ClassGUID;
-    TCHAR ClassName[MAX_CLASS_NAME_LEN];
-    TCHAR hwIdList[LINE_LEN+4];
-    TCHAR InfPath[MAX_PATH];
-    int failcode = EXIT_FAIL;
-    LPCTSTR hwid = NULL;
+	HDEVINFO DeviceInfoSet = INVALID_HANDLE_VALUE;
+	SP_DEVINFO_DATA DeviceInfoData;
+	GUID ClassGUID;
+	TCHAR ClassName[MAX_CLASS_NAME_LEN];
+	TCHAR hwIdList[LINE_LEN + 4];
+	TCHAR InfPath[MAX_PATH];
+	int failcode = EXIT_FAIL;
+	LPCTSTR hwid = NULL;
 	DWORD res;
-    LPCTSTR inf = NULL;
+	LPCTSTR inf = NULL;
 
-    if (Machine)
+	if (Machine)
 	{
-        //
-        // must be local machine
-        //
+		//
+		// must be local machine
+		//
 		TRACE_PRINT1("cmdInstall: error, Machine = %s.", Machine);
 		TRACE_EXIT();
-        return EXIT_USAGE;
-    }
-    if (argc < 2)
+		return EXIT_USAGE;
+	}
+	if (argc < 2)
 	{
-        //
-        // at least HWID required
-        //
+		//
+		// at least HWID required
+		//
 		TRACE_PRINT1("cmdInstall: error, argc = %d.", argc);
 		TRACE_EXIT();
-        return EXIT_USAGE;
-    }
-    inf = argv[0];
-    if (!inf[0])
+		return EXIT_USAGE;
+	}
+	inf = argv[0];
+	if (!inf[0])
 	{
 		TRACE_PRINT1("cmdUpdate: error, argv[0] = %s.", argv[0]);
 		TRACE_EXIT();
-        return EXIT_USAGE;
-    }
+		return EXIT_USAGE;
+	}
 
-    hwid = argv[1];
-    if (!hwid[0])
+	hwid = argv[1];
+	if (!hwid[0])
 	{
 		TRACE_PRINT1("cmdUpdate: error, argv[1] = %s.", argv[1]);
 		TRACE_EXIT();
-        return EXIT_USAGE;
-    }
+		return EXIT_USAGE;
+	}
 
-    //
-    // Inf must be a full pathname
-    //
+	//
+	// Inf must be a full pathname
+	//
 	res = GetFullPathName(inf, MAX_PATH, InfPath, NULL);
 	if (res >= MAX_PATH || res == 0)
 	{
-        //
-        // inf pathname too long
-        // or other error (GetLastError)
+		//
+		// inf pathname too long
+		// or other error (GetLastError)
 		TRACE_PRINT1("GetFullPathName: error, res = %d.", res);
 		TRACE_EXIT();
-        return EXIT_FAIL;
-    }
+		return EXIT_FAIL;
+	}
 
-    //
-    // List of hardware ID's must be double zero-terminated
-    //
-    ZeroMemory(hwIdList, sizeof(hwIdList));
-    if (FAILED(_tcscpy_s(hwIdList, LINE_LEN, hwid)))
+	//
+	// List of hardware ID's must be double zero-terminated
+	//
+	ZeroMemory(hwIdList, sizeof(hwIdList));
+	if (FAILED(_tcscpy_s(hwIdList, LINE_LEN, hwid)))
 	{
-        goto final;
-    }
+		goto final;
+	}
 
-    //
-    // Use the INF File to extract the Class GUID.
-    //
-    if (!SetupDiGetINFClass(InfPath, &ClassGUID, ClassName, sizeof(ClassName) / sizeof(ClassName[0]), 0))
-    {
-        goto final;
-    }
+	//
+	// Use the INF File to extract the Class GUID.
+	//
+	if (!SetupDiGetINFClass(InfPath, &ClassGUID, ClassName, sizeof(ClassName) / sizeof(ClassName[0]), 0))
+	{
+		goto final;
+	}
 
-    //
-    // Create the container for the to-be-created Device Information Element.
-    //
-    DeviceInfoSet = SetupDiCreateDeviceInfoList(&ClassGUID, 0);
-    if (DeviceInfoSet == INVALID_HANDLE_VALUE)
-    {
-        goto final;
-    }
+	//
+	// Create the container for the to-be-created Device Information Element.
+	//
+	DeviceInfoSet = SetupDiCreateDeviceInfoList(&ClassGUID, 0);
+	if (DeviceInfoSet == INVALID_HANDLE_VALUE)
+	{
+		goto final;
+	}
 
-    //
-    // Now create the element.
-    // Use the Class GUID and Name from the INF file.
-    //
-    DeviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
-    if (!SetupDiCreateDeviceInfo(DeviceInfoSet,
-        ClassName,
-        &ClassGUID,
-        NULL,
-        0,
-        DICD_GENERATE_ID,
-        &DeviceInfoData))
-    {
-        goto final;
-    }
+	//
+	// Now create the element.
+	// Use the Class GUID and Name from the INF file.
+	//
+	DeviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+	if (!SetupDiCreateDeviceInfo(DeviceInfoSet,
+		ClassName,
+		&ClassGUID,
+		NULL,
+		0,
+		DICD_GENERATE_ID,
+		&DeviceInfoData))
+	{
+		goto final;
+	}
 
-    //
-    // Add the HardwareID to the Device's HardwareID property.
-    //
-    if (!SetupDiSetDeviceRegistryProperty(DeviceInfoSet,
-        &DeviceInfoData,
-        SPDRP_HARDWAREID,
-        (LPBYTE) hwIdList,
-        (lstrlen(hwIdList) + 1 + 1) * sizeof(TCHAR)))
-    {
-        goto final;
-    }
+	//
+	// Add the HardwareID to the Device's HardwareID property.
+	//
+	if (!SetupDiSetDeviceRegistryProperty(DeviceInfoSet,
+		&DeviceInfoData,
+		SPDRP_HARDWAREID,
+		(LPBYTE)hwIdList,
+		(lstrlen(hwIdList) + 1 + 1) * sizeof(TCHAR)))
+	{
+		goto final;
+	}
 
 	//
 	// Get the Device Instance ID for our adapter.
@@ -1302,18 +1302,18 @@ Return Value:
 	}
 	g_DevInstanceID = getIntDevID(DevInstanceID);
 
-    //
-    // Transform the registry element into an actual devnode
-    // in the PnP HW tree.
-    //
-    if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE,
-        DeviceInfoSet,
-        &DeviceInfoData))
-    {
-        goto final;
-    }
+	//
+	// Transform the registry element into an actual devnode
+	// in the PnP HW tree.
+	//
+	if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE,
+		DeviceInfoSet,
+		&DeviceInfoData))
+	{
+		goto final;
+	}
 
-    FormatToStream(stdout,MSG_INSTALL_UPDATE);
+	FormatToStream(stdout, MSG_INSTALL_UPDATE);
 
 	// Mark device as an endpoint, not a network
 	HKEY DevRegKey = SetupDiCreateDevRegKey(DeviceInfoSet,
@@ -1332,6 +1332,8 @@ Return Value:
 			TEXT("*NdisDeviceType"), 0, REG_DWORD, (const BYTE *)&devtype, sizeof(devtype))) {
 			TRACE_PRINT1("Couldn't set *NdisDeviceType: %x", GetLastError());// Oops. Hope this isn't a problem.
 		}
+#if 0
+		// These values were causing problems.
 		// https://msdn.microsoft.com/library/windows/hardware/ff565767
 		devtype = IF_TYPE_SOFTWARE_LOOPBACK; // 24
 		if (ERROR_SUCCESS != RegSetValueEx(DevRegKey,
@@ -1350,6 +1352,7 @@ Return Value:
 			TEXT("*PhysicalMediaType"), 0, REG_DWORD, (const BYTE *)&devtype, sizeof(devtype))) {
 			TRACE_PRINT1("Couldn't set *PhysicalMediaType: %x", GetLastError());// Oops. Hope this isn't a problem.
 		}
+#endif
 		RegCloseKey(DevRegKey);
 	}
 	else{ TRACE_PRINT1("Couldn't create/open dev reg key: %x", GetLastError()); }
@@ -1359,14 +1362,19 @@ Return Value:
 	//
 	failcode = cmdUpdate(BaseName, Machine, Flags, argc, argv);
 
-final:
-
-    if (DeviceInfoSet != INVALID_HANDLE_VALUE)
-	{
-        SetupDiDestroyDeviceInfoList(DeviceInfoSet);
-    }
+	final:
 
 	TRACE_PRINT1("cmdInstall: failcode = %d.", failcode);
+	if (failcode == EXIT_FAIL)
+	{
+		TRACE_PRINT1("cmdInstall: GetLastError: %0x", GetLastError());
+	}
+
+	if (DeviceInfoSet != INVALID_HANDLE_VALUE)
+	{
+		SetupDiDestroyDeviceInfoList(DeviceInfoSet);
+	}
+
 	TRACE_EXIT();
     return failcode;
 }
@@ -1580,6 +1588,29 @@ BOOL SaveDevIDToFile(int iDevID)
 	return TRUE;
 }
 
+BOOL DeleteDevIDFile()
+{
+	TRACE_ENTER();
+
+	TCHAR strLoopbackIDFilePath[MAX_PATH + 30];
+	if (!GetConfigFilePath(strLoopbackIDFilePath))
+	{
+		TRACE_PRINT("GetConfigFilePath: error.");
+		TRACE_EXIT();
+		return FALSE;
+	}
+
+	if (!DeleteFile(strLoopbackIDFilePath))
+	{
+		TRACE_PRINT1("DeleteFile %s: error: %08x", GetLastError());
+		TRACE_EXIT();
+		return FALSE;
+	}
+
+	TRACE_EXIT();
+	return TRUE;
+}
+
 int LoadDevIDFromFile()
 {
 	TRACE_ENTER();
@@ -1678,6 +1709,20 @@ BOOL UninstallLoopbackAdapter()
 	if (!RemoveLoopbackDeviceInternal(iNpcapAdapterID))
 	{
 		TRACE_PRINT("RemoveLoopbackDeviceInternal: error.");
+		TRACE_EXIT();
+		return FALSE;
+	}
+
+  if (!EraseLoopbackRecord())
+	{
+		TRACE_PRINT("EraseLoopbackRecord: error.");
+		TRACE_EXIT();
+		return FALSE;
+	}
+
+  if (!DeleteDevIDFile())
+	{
+		TRACE_PRINT("DeleteDevIDFile: error.");
 		TRACE_EXIT();
 		return FALSE;
 	}

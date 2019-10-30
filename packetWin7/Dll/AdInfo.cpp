@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -117,6 +117,7 @@
 
 
 static BOOLEAN PacketAddFakeNdisWanAdapter();
+static BOOLEAN PacketAddFakeLoopbackAdapter();
 
 #ifdef HAVE_IPHELPER_API
 static BOOLEAN IsIPv4Enabled(LPCSTR AdapterNameA);
@@ -363,7 +364,6 @@ static BOOLEAN PacketGetAddressesFromRegistry(LPCSTR AdapterNameA, PNPF_IF_ADDRE
 		status = RegQueryValueEx(TcpIpKey,TEXT("DhcpIPAddress"),NULL,&RegType,(LPBYTE)String,&BufLen);
 		if (status != ERROR_SUCCESS) {
 			RegCloseKey(TcpIpKey);
-			RegCloseKey(UnderTcpKey);
 			goto fail;
 		}
 
@@ -425,7 +425,6 @@ static BOOLEAN PacketGetAddressesFromRegistry(LPCSTR AdapterNameA, PNPF_IF_ADDRE
 		status = RegQueryValueEx(TcpIpKey,TEXT("DhcpSubnetMask"),NULL,&RegType,(LPBYTE)String,&BufLen);
 		if (status != ERROR_SUCCESS) {
 			RegCloseKey(TcpIpKey);
-			RegCloseKey(UnderTcpKey);
 			goto fail;
 		}
 		
@@ -463,7 +462,6 @@ static BOOLEAN PacketGetAddressesFromRegistry(LPCSTR AdapterNameA, PNPF_IF_ADDRE
 		// The number of masks MUST be equal to the number of adresses
 		if(nmasks != naddrs){
 			RegCloseKey(TcpIpKey);
-			RegCloseKey(UnderTcpKey);
 			goto fail;
 		}
 				
@@ -476,7 +474,6 @@ static BOOLEAN PacketGetAddressesFromRegistry(LPCSTR AdapterNameA, PNPF_IF_ADDRE
 		status = RegQueryValueEx(TcpIpKey,TEXT("IPAddress"),NULL,&RegType,(LPBYTE)String,&BufLen);
 		if (status != ERROR_SUCCESS) {
 			RegCloseKey(TcpIpKey);
-			RegCloseKey(UnderTcpKey);
 			goto fail;
 		}
 		
@@ -535,7 +532,6 @@ static BOOLEAN PacketGetAddressesFromRegistry(LPCSTR AdapterNameA, PNPF_IF_ADDRE
 		status = RegQueryValueEx(TcpIpKey,TEXT("SubnetMask"),NULL,&RegType,(LPBYTE)String,&BufLen);
 		if (status != ERROR_SUCCESS) {
 			RegCloseKey(TcpIpKey);
-			RegCloseKey(UnderTcpKey);
 			goto fail;
 		}
 		
@@ -574,18 +570,12 @@ static BOOLEAN PacketGetAddressesFromRegistry(LPCSTR AdapterNameA, PNPF_IF_ADDRE
 		// The number of masks MUST be equal to the number of adresses
 		if(nmasks != naddrs){
 			RegCloseKey(TcpIpKey);
-			RegCloseKey(UnderTcpKey);
 			goto fail;
 		}
 				
 	}
 	
 	RegCloseKey(TcpIpKey);
-	RegCloseKey(UnderTcpKey);
-	
-	if (status != ERROR_SUCCESS) {
-		goto fail;
-	}
 	
 	TRACE_PRINT("Successfully retrieved the addresses from the registry.");
 	TRACE_EXIT();
@@ -1345,16 +1335,13 @@ static BOOLEAN PacketAddAdapterNPF(PCHAR AdName, UINT flags)
 static BOOLEAN PacketGetAdaptersNPF()
 {
 	HKEY		LinkageKey,AdapKey, OneAdapKey;
-	DWORD		RegKeySize=0;
 	LONG		Status;
 	ULONG		Result;
 	INT			i;
 	DWORD		dim;
-	DWORD		RegType;
 	WCHAR		TName[256];
 	CHAR		TAName[256];
 	TCHAR		AdapName[256];
-	CHAR		*TcpBindingsMultiString;
 	UINT		FireWireFlag;
 //  
 //	Old registry based WinPcap names
@@ -2197,6 +2184,8 @@ BOOLEAN PacketUpdateAdInfo(PCHAR AdapterName)
 	PacketAddFakeNdisWanAdapter();
 #endif //HAVE_WANPACKET_API
 
+	PacketAddFakeLoopbackAdapter();
+
 #ifdef HAVE_DAG_API
 	if(g_p_dagc_open != NULL)	
 	{
@@ -2276,6 +2265,11 @@ void PacketPopulateAdaptersInfoList()
 	}
 #endif // HAVE_WANPACKET_API
 
+	if (!PacketAddFakeLoopbackAdapter())
+	{
+		TRACE_PRINT("PacketPopulateAdaptersInfoList: adding fake Loopback adapter failed.");
+	}
+
 #ifdef HAVE_AIRPCAP_API
 	if(g_PAirpcapGetDeviceList)	// Ensure that the airpcap dll is present
 	{
@@ -2311,6 +2305,54 @@ void PacketPopulateAdaptersInfoList()
 	TRACE_EXIT();
 }
 
+static BOOLEAN PacketAddFakeLoopbackAdapter()
+{
+	//this function should acquire the g_AdaptersInfoMutex, since it's NOT called with an ADAPTER_INFO as parameter
+	PADAPTER_INFO TmpAdInfo, SAdInfo;
+	CHAR LoopbackName[MAX_WINPCAP_KEY_CHARS] = FAKE_LOOPBACK_ADAPTER_NAME;
+	CHAR LoopbackDesc[MAX_WINPCAP_KEY_CHARS] = FAKE_LOOPBACK_ADAPTER_DESCRIPTION;
+
+	TRACE_ENTER();
+
+
+	WaitForSingleObject(g_AdaptersInfoMutex, INFINITE);
+	
+	for(SAdInfo = g_AdaptersInfoList; SAdInfo != NULL; SAdInfo = SAdInfo->Next)
+	{
+		if(strcmp(LoopbackName, SAdInfo->Name) == 0)
+		{
+			TRACE_PRINT("PacketAddFakeLoopbackAdapter: Adapter already present in the list");
+			ReleaseMutex(g_AdaptersInfoMutex);
+			TRACE_EXIT();
+			return TRUE;
+		}
+	}
+
+	TmpAdInfo = (PADAPTER_INFO) GlobalAllocPtr(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(ADAPTER_INFO));
+	if (TmpAdInfo == NULL) 
+	{
+		TRACE_PRINT("PacketAddFakeLoopbackAdapter: GlobalAlloc Failed allocating memory for the AdInfo structure");
+		ReleaseMutex(g_AdaptersInfoMutex);
+		TRACE_EXIT();
+		return FALSE;
+	}
+
+	strncpy(TmpAdInfo->Name, LoopbackName, sizeof(TmpAdInfo->Name) - 1);
+	strncpy(TmpAdInfo->Description, LoopbackDesc, sizeof(TmpAdInfo->Description) - 1);
+	TmpAdInfo->LinkLayer.LinkType = (UINT) NdisMediumNull;
+	TmpAdInfo->LinkLayer.LinkSpeed = 10 * 1000 * 1000; //we emulate a fake 10MBit Ethernet
+	TmpAdInfo->Flags = 0;
+	memset(TmpAdInfo->MacAddress,'\0',6);
+	TmpAdInfo->MacAddressLen = 6;
+	TmpAdInfo->pNetworkAddresses = NULL;
+
+	TmpAdInfo->Next = g_AdaptersInfoList;
+	g_AdaptersInfoList = TmpAdInfo;
+	ReleaseMutex(g_AdaptersInfoMutex);
+
+	TRACE_EXIT();
+	return TRUE;
+}
 #ifdef HAVE_WANPACKET_API
 
 static BOOLEAN PacketAddFakeNdisWanAdapter()
@@ -2364,7 +2406,7 @@ static BOOLEAN PacketAddFakeNdisWanAdapter()
 		}
 	}
 
-	TmpAdInfo = GlobalAllocPtr(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(ADAPTER_INFO));
+	TmpAdInfo = (PADAPTER_INFO) GlobalAllocPtr(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(ADAPTER_INFO));
 	if (TmpAdInfo == NULL) 
 	{
 		TRACE_PRINT("PacketAddFakeNdisWanAdapter: GlobalAlloc Failed allocating memory for the AdInfo structure");
@@ -2378,7 +2420,7 @@ static BOOLEAN PacketAddFakeNdisWanAdapter()
 	TmpAdInfo->LinkLayer.LinkType = NdisMedium802_3;
 	TmpAdInfo->LinkLayer.LinkSpeed = 10 * 1000 * 1000; //we emulate a fake 10MBit Ethernet
 	TmpAdInfo->Flags = INFO_FLAG_NDISWAN_ADAPTER;
-	memset(TmpAdInfo->MacAddress,'0',6);
+	memset(TmpAdInfo->MacAddress,'\0',6);
 	TmpAdInfo->MacAddressLen = 6;
 	TmpAdInfo->pNetworkAddresses = NULL;
 

@@ -1,4 +1,5 @@
-#include "pcap.h"
+#include <pcap.h>
+#include "misc.h"
 
 /* prototype of the packet handler */
 void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data);
@@ -12,6 +13,13 @@ int i=0;
 pcap_t *adhandle;
 char errbuf[PCAP_ERRBUF_SIZE];
 	
+    /* Load Npcap and its functions. */
+    if (!LoadNpcapDlls())
+    {
+        fprintf(stderr, "Couldn't load Npcap\n");
+        exit(1);
+    }
+
 	/* Retrieve the device list on the local machine */
 	if (pcap_findalldevs_ex(PCAP_SRC_IF_STRING, NULL, &alldevs, errbuf) == -1)
 	{
@@ -31,7 +39,7 @@ char errbuf[PCAP_ERRBUF_SIZE];
 	
 	if(i==0)
 	{
-		printf("\nNo interfaces found! Make sure WinPcap is installed.\n");
+		printf("\nNo interfaces found! Make sure Npcap is installed.\n");
 		return -1;
 	}
 	
@@ -59,7 +67,7 @@ char errbuf[PCAP_ERRBUF_SIZE];
 							  errbuf			// error buffer
 							  ) ) == NULL)
 	{
-		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", d->name);
+		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by Npcap\n", d->name);
 		/* Free the device list */
 		pcap_freealldevs(alldevs);
 		return -1;

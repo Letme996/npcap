@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -98,7 +98,7 @@ NPF_Write(
 	)
 {
 	POPEN_INSTANCE		Open;
-	POPEN_INSTANCE		GroupOpen;
+	PSINGLE_LIST_ENTRY Curr;
 	POPEN_INSTANCE		TempOpen;
 	PIO_STACK_LOCATION	IrpSp;
 	ULONG				SendFlags = 0;
@@ -112,6 +112,14 @@ NPF_Write(
 	IrpSp = IoGetCurrentIrpStackLocation(Irp);
 
 	Open = IrpSp->FileObject->FsContext;
+	if (!NPF_IsOpenInstance(Open))
+	{
+		Irp->IoStatus.Status = STATUS_INVALID_HANDLE;
+		Irp->IoStatus.Information = 0;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		TRACE_EXIT();
+		return STATUS_INVALID_HANDLE;
+	}
 
 	if (NPF_StartUsingOpenInstance(Open) == FALSE)
 	{
@@ -147,12 +155,11 @@ NPF_Write(
 	// 2. less-equal than max frame size for the link layer and
 	// 3. the maximum frame size of the link layer should not be zero.
 	//
+	// These we can check without bothering with the filter module:
 	if (IrpSp->Parameters.Write.Length == 0 || 	// Check that the buffer provided by the user is not empty
-		Open->MaxFrameSize == 0 ||	// Check that the MaxFrameSize is correctly initialized
-		Irp->MdlAddress == NULL ||
-		IrpSp->Parameters.Write.Length > Open->MaxFrameSize) // Check that the fame size is smaller that the MTU
+		Irp->MdlAddress == NULL)
 	{
-		TRACE_MESSAGE(PACKET_DEBUG_LOUD, "Frame size out of range, or maxFrameSize = 0. Send aborted");
+		TRACE_MESSAGE(PACKET_DEBUG_LOUD, "Write parameters empty. Send aborted");
 
 		NPF_StopUsingOpenInstance(Open);
 
@@ -167,7 +174,7 @@ NPF_Write(
 	// 
 	// Increment the ref counter of the binding handle, if possible
 	//
-	if (!Open->GroupHead || NPF_StartUsingBinding(Open->GroupHead) == FALSE)
+	if (!Open->pFiltMod || NPF_StartUsingBinding(Open->pFiltMod) == FALSE)
 	{
 		TRACE_MESSAGE(PACKET_DEBUG_LOUD, "Adapter is probably unbinding, cannot send packets");
 
@@ -181,13 +188,32 @@ NPF_Write(
 		return STATUS_INVALID_DEVICE_REQUEST;
 	}
 
+	// Now that we have a handle to the filter module, validate specifics:
+	if (Open->pFiltMod->MaxFrameSize == 0 ||	// Check that the MaxFrameSize is correctly initialized
+		IrpSp->Parameters.Write.Length > Open->pFiltMod->MaxFrameSize) // Check that the fame size is smaller that the MTU
+	{
+		NPF_StopUsingBinding(Open->pFiltMod);
+
+		TRACE_MESSAGE(PACKET_DEBUG_LOUD, "Frame size out of range, or maxFrameSize = 0. Send aborted");
+
+		NPF_StopUsingOpenInstance(Open);
+
+		Irp->IoStatus.Information = 0;
+		Irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+		TRACE_EXIT();
+
+		return STATUS_UNSUCCESSFUL;
+	}
+
 	NdisAcquireSpinLock(&Open->WriteLock);
 	if (Open->WriteInProgress)
 	{
 		// Another write operation is currently in progress
 		NdisReleaseSpinLock(&Open->WriteLock);
 
-		NPF_StopUsingBinding(Open->GroupHead);
+		NPF_StopUsingBinding(Open->pFiltMod);
 
 		TRACE_MESSAGE(PACKET_DEBUG_LOUD, "Another Send operation is in progress, aborting.");
 
@@ -211,7 +237,7 @@ NPF_Write(
 
 	TRACE_MESSAGE2(PACKET_DEBUG_LOUD,
 		"Max frame size = %u, packet size = %u",
-		Open->MaxFrameSize,
+		Open->pFiltMod->MaxFrameSize,
 		IrpSp->Parameters.Write.Length);
 
 	//
@@ -225,8 +251,11 @@ NPF_Write(
 
 	while (numSentPackets < NumSends)
 	{
-		pNetBufferList = NdisAllocateNetBufferAndNetBufferList(Open->PacketPool,
-			0,
+		/* Unlike NPF_BufferedWrite, we can directly allocate NBLs
+		 * using the MDL in the IRP because the device was created with
+		 * DO_DIRECT_IO. */
+		pNetBufferList = NdisAllocateNetBufferAndNetBufferList(Open->pFiltMod->PacketPool,
+			sizeof(PACKET_RESERVED),
 			0,
 			Irp->MdlAddress,
 			0,
@@ -252,15 +281,16 @@ NPF_Write(
 			// The packet hasn't a buffer that needs not to be freed after every single write
 			RESERVED(pNetBufferList)->FreeBufAfterWrite = FALSE;
 
-			// Save the IRP associated with the packet
-			// RESERVED(pPacket)->Irp=Irp;
-
 			// Attach the writes buffer to the packet
 
-			ASSERT(Open->GroupHead != NULL);
+			ASSERT(Open->pFiltMod != NULL);
 
+			/* TODO: fix this locking and check. Either we should
+			 * lock the filter module and check adapter binding
+			 * status, or we should lock the open instance and
+			 * check the open status. */
 			NdisAcquireSpinLock(&Open->OpenInUseLock);
-			if (Open->GroupHead->PausePending)
+			if (Open->pFiltMod->AdapterBindingStatus != FilterRunning)
 			{
 				Status = NDIS_STATUS_PAUSED;
 			}
@@ -277,7 +307,7 @@ NPF_Write(
 				TRACE_MESSAGE(PACKET_DEBUG_LOUD, "The adapter is pending to pause, unable to send the packets.");
 
 				NPF_FreePackets(pNetBufferList);
-				NPF_StopUsingBinding(Open->GroupHead);
+				NPF_StopUsingBinding(Open->pFiltMod);
 				NPF_StopUsingOpenInstance(Open);
 
 				Irp->IoStatus.Information = 0;
@@ -294,36 +324,33 @@ NPF_Write(
 
 #ifdef HAVE_WFP_LOOPBACK_SUPPORT
 			// Do not capture the send traffic we send, if this is our loopback adapter.
-			if (Open->Loopback == FALSE)
+			if (Open->pFiltMod->Loopback == FALSE)
 			{
 #endif
 				/* Lock the group */
-				NdisAcquireSpinLock(&Open->GroupHead->GroupLock);
-				GroupOpen = Open->GroupHead->GroupNext;
-				while (GroupOpen != NULL)
+				NdisAcquireSpinLock(&Open->pFiltMod->OpenInstancesLock);
+				for (Curr = Open->pFiltMod->OpenInstances.Next; Curr != NULL; Curr = Curr->Next)
 				{
-					TempOpen = GroupOpen;
-					if (TempOpen->AdapterBindingStatus == ADAPTER_BOUND && TempOpen->SkipSentPackets == FALSE)
+					TempOpen = CONTAINING_RECORD(Curr, OPEN_INSTANCE, OpenInstancesEntry);
+					if (TempOpen->OpenStatus == OpenRunning && TempOpen->SkipSentPackets == FALSE)
 					{
 						NPF_TapExForEachOpen(TempOpen, pNetBufferList);
 					}
-
-					GroupOpen = TempOpen->GroupNext;
 				}
 				/* Release the spin lock no matter what. */
-				NdisReleaseSpinLock(&Open->GroupHead->GroupLock);
+				NdisReleaseSpinLock(&Open->pFiltMod->OpenInstancesLock);
 #ifdef HAVE_WFP_LOOPBACK_SUPPORT
 			}
 #endif
 
-			pNetBufferList->SourceHandle = Open->AdapterHandle;
-			NPFSetNBLChildOpen(pNetBufferList, Open); //save the child open object in the packets
+			pNetBufferList->SourceHandle = Open->pFiltMod->AdapterHandle;
+			RESERVED(pNetBufferList)->ChildOpen = Open; //save the child open object in the packets
 			//SendFlags |= NDIS_SEND_FLAGS_CHECK_FOR_LOOPBACK;
 
 			// Recognize IEEE802.1Q tagged packet, as no many adapters support VLAN tag packet sending, no much use for end users,
 			// and this code examines the data which lacks efficiency, so I left it commented, the sending part is also unfinished.
 			// This code refers to Win10Pcap at https://github.com/SoftEtherVPN/Win10Pcap.
-// 			if (Open->Loopback == FALSE)
+// 			if (Open->pFiltMod->Loopback == FALSE)
 // 			{
 // 				PUCHAR pHeaderBuffer;
 // 				UINT iFres;
@@ -365,20 +392,20 @@ NPF_Write(
 			//  Call the MAC
 			//
 #ifdef HAVE_WFP_LOOPBACK_SUPPORT
-			if (Open->Loopback == TRUE)
+			if (Open->pFiltMod->Loopback == TRUE)
 			{
-				NPF_LoopbackSendNetBufferLists(Open->GroupHead,
+				NPF_LoopbackSendNetBufferLists(Open->pFiltMod,
 					pNetBufferList);
 			}
 			else
 #endif
 #ifdef HAVE_RX_SUPPORT
-				if (Open->SendToRxPath == TRUE)
+				if (Open->pFiltMod->SendToRxPath == TRUE)
 				{
-					IF_LOUD(DbgPrint("NPF_Write::SendToRxPath, Open->AdapterHandle=%p, pNetBufferList=%p\n", Open->AdapterHandle, pNetBufferList);)
+					IF_LOUD(DbgPrint("NPF_Write::SendToRxPath, Open->pFiltMod->AdapterHandle=%p, pNetBufferList=%p\n", Open->pFiltMod->AdapterHandle, pNetBufferList);)
 					// pretend to receive these packets from network and indicate them to upper layers
 					NdisFIndicateReceiveNetBufferLists(
-						Open->AdapterHandle,
+						Open->pFiltMod->AdapterHandle,
 						pNetBufferList,
 						NDIS_DEFAULT_PORT_NUMBER,
 						1,
@@ -387,7 +414,7 @@ NPF_Write(
 				else
 #endif
 				{
-					NdisFSendNetBufferLists(Open->AdapterHandle,
+					NdisFSendNetBufferLists(Open->pFiltMod->AdapterHandle,
 						pNetBufferList,
 						NDIS_DEFAULT_PORT_NUMBER,
 						SendFlags);
@@ -413,7 +440,7 @@ NPF_Write(
 	//
 	
 #ifdef HAVE_RX_SUPPORT
-	if (Open->SendToRxPath && pNetBufferList)
+	if (Open->pFiltMod->SendToRxPath && pNetBufferList)
 	{
 		NPF_FreePackets(pNetBufferList);
 	}
@@ -424,7 +451,7 @@ NPF_Write(
 	//
 	// all the packets have been transmitted, release the use of the adapter binding
 	//
-	NPF_StopUsingBinding(Open->GroupHead);
+	NPF_StopUsingBinding(Open->pFiltMod);
 
 	//
 	// no more writes are in progress
@@ -457,7 +484,7 @@ NPF_BufferedWrite(
 	BOOLEAN Sync)
 {
 	POPEN_INSTANCE			Open;
-	POPEN_INSTANCE			GroupOpen;
+	PSINGLE_LIST_ENTRY Curr;
 	POPEN_INSTANCE			TempOpen;
 	PIO_STACK_LOCATION		IrpSp;
 	PNET_BUFFER_LIST		pNetBufferList = NULL;
@@ -474,6 +501,7 @@ NPF_BufferedWrite(
 	//	PCHAR				CurPos;
 	//	PCHAR				EndOfUserBuff = UserBuff + UserBuffSize;
 	INT						result;
+	PVOID npBuff = NULL;
 
 	TRACE_ENTER();
 
@@ -482,12 +510,17 @@ NPF_BufferedWrite(
 	IrpSp = IoGetCurrentIrpStackLocation(Irp);
 
 	Open = (POPEN_INSTANCE) IrpSp->FileObject->FsContext;
+	if (!NPF_IsOpenInstance(Open))
+	{
+		TRACE_EXIT();
+		return -STATUS_INVALID_HANDLE;
+	}
 
-	if (!Open->GroupHead || NPF_StartUsingBinding(Open->GroupHead) == FALSE)
+	if (!Open->pFiltMod || NPF_StartUsingBinding(Open->pFiltMod) == FALSE)
 	{
 		// The Network adapter was removed. 
 		TRACE_EXIT();
-		return 0;
+		return -STATUS_DEVICE_DOES_NOT_EXIST;
 	}
 
 	// Sanity check on the user buffer
@@ -496,22 +529,22 @@ NPF_BufferedWrite(
 		// 
 		// release ownership of the NdisAdapter binding
 		//
-		NPF_StopUsingBinding(Open->GroupHead);
+		NPF_StopUsingBinding(Open->pFiltMod);
 		TRACE_EXIT();
-		return 0;
+		return -STATUS_INVALID_PARAMETER;
 	}
 
 	// Check that the MaxFrameSize is correctly initialized
-	if (Open->MaxFrameSize == 0)
+	if (Open->pFiltMod->MaxFrameSize == 0)
 	{
 		IF_LOUD(DbgPrint("NPF_BufferedWrite: Open->MaxFrameSize not initialized, probably because of a problem in the OID query\n");)
 
 		// 
 		// release ownership of the NdisAdapter binding
 		//
-		NPF_StopUsingBinding(Open->GroupHead);
+		NPF_StopUsingBinding(Open->pFiltMod);
 		TRACE_EXIT();
-		return 0;
+		return -STATUS_UNSUCCESSFUL;
 	}
 
 	// Reset the event used to synchronize packet allocation
@@ -542,18 +575,18 @@ NPF_BufferedWrite(
 			// Malformed header
 			IF_LOUD(DbgPrint("NPF_BufferedWrite: malformed or bogus user buffer, aborting write.\n");)
 
-			result = -1;
+			result = -STATUS_INVALID_PARAMETER;
 			break;
 		}
 
 		pWinpcapHdr = (struct sf_pkthdr *)(UserBuff + Pos);
 
-		if (pWinpcapHdr->caplen == 0 || pWinpcapHdr->caplen > Open->MaxFrameSize)
+		if (pWinpcapHdr->caplen == 0 || pWinpcapHdr->caplen > Open->pFiltMod->MaxFrameSize)
 		{
 			// Malformed header
 			IF_LOUD(DbgPrint("NPF_BufferedWrite: malformed or bogus user buffer, aborting write.\n");)
 
-			result = -1;
+			result = -STATUS_INVALID_PARAMETER;
 			break;
 		}
 
@@ -574,30 +607,42 @@ NPF_BufferedWrite(
 			//
 			IF_LOUD(DbgPrint("NPF_BufferedWrite: malformed or bogus user buffer, aborting write.\n");)
 
-			result = -1;
+			result = -STATUS_INVALID_PARAMETER;
 			break;
 		}
 
+		/* Copy packet data to non-paged memory, otherwise we induce
+		 * page faults in NIC drivers: http://issues.nmap.org/1398
+		 * Alternately, we could possibly use Direct I/O for the BIOCSENDPACKETS IoCtl? */
+		npBuff = ExAllocatePoolWithTag(NonPagedPool, pWinpcapHdr->caplen, 'WBPN');
+		if (npBuff == NULL)
+		{
+			IF_LOUD(DbgPrint("NPF_BufferedWrite: unable to allocate non-paged buffer.\n");)
+			result = -STATUS_INSUFFICIENT_RESOURCES;
+			break;
+		}
+		RtlCopyMemory(npBuff, UserBuff + Pos, pWinpcapHdr->caplen);
+
 		// Allocate an MDL to map the packet data
-		TmpMdl = IoAllocateMdl(UserBuff + Pos, pWinpcapHdr->caplen, FALSE, FALSE, NULL);
+		TmpMdl = NdisAllocateMdl(Open->pFiltMod, npBuff, pWinpcapHdr->caplen);
 
 		if (TmpMdl == NULL)
 		{
 			// Unable to map the memory: packet lost
 			IF_LOUD(DbgPrint("NPF_BufferedWrite: unable to allocate the MDL.\n");)
 
-			result = -1;
+			result = -STATUS_INSUFFICIENT_RESOURCES;
 			break;
 		}
 
-		MmBuildMdlForNonPagedPool(TmpMdl);	// XXX can this line be removed?
+		MmBuildMdlForNonPagedPool(TmpMdl);
 
 		Pos += pWinpcapHdr->caplen;
 
 		// Allocate a packet from our free list
 		pNetBufferList = NdisAllocateNetBufferAndNetBufferList(
-			Open->PacketPool,
-			0,
+			Open->pFiltMod->PacketPool,
+			sizeof(PACKET_RESERVED),
 			0,
 			TmpMdl,
 			0,
@@ -614,8 +659,8 @@ NPF_BufferedWrite(
 
 			// Try again to allocate a packet
 			pNetBufferList = NdisAllocateNetBufferAndNetBufferList(
-				Open->PacketPool,
-				0,
+				Open->pFiltMod->PacketPool,
+				sizeof(PACKET_RESERVED),
 				0,
 				TmpMdl,
 				0,
@@ -624,9 +669,9 @@ NPF_BufferedWrite(
 			if (pNetBufferList == NULL)
 			{
 				// Second failure, report an error
-				IoFreeMdl(TmpMdl);
+				NdisFreeMdl(TmpMdl);
 
-				result = -1;
+				result = -STATUS_INSUFFICIENT_RESOURCES;
 				break;
 			}
 		}
@@ -644,10 +689,10 @@ NPF_BufferedWrite(
 
 		TmpMdl->Next = NULL;
 
-		ASSERT(Open->GroupHead != NULL);
+		ASSERT(Open->pFiltMod != NULL);
 
 		NdisAcquireSpinLock(&Open->OpenInUseLock);
-		if (Open->GroupHead->PausePending)
+		if (Open->pFiltMod->AdapterBindingStatus != FilterRunning)
 		{
 			Status = NDIS_STATUS_PAUSED;
 		}
@@ -664,50 +709,46 @@ NPF_BufferedWrite(
 			// The adapter is pending to pause, so we don't send the packets.
 			IF_LOUD(DbgPrint("NPF_BufferedWrite: the adapter is pending to pause, unable to send the packets.\n");)
 
-			result = -1;
+			result = -STATUS_OPERATION_IN_PROGRESS;
 			break;
 		}
 
 		//receive the packets before sending them
 		/* Lock the group */
-		NdisAcquireSpinLock(&Open->GroupHead->GroupLock);
-		GroupOpen = Open->GroupHead->GroupNext;
-
-		while (GroupOpen != NULL)
+		NdisAcquireSpinLock(&Open->pFiltMod->OpenInstancesLock);
+		for (Curr = Open->pFiltMod->OpenInstances.Next; Curr != NULL; Curr = Curr->Next)
 		{
-			TempOpen = GroupOpen;
-			if (TempOpen->AdapterBindingStatus == ADAPTER_BOUND && TempOpen->SkipSentPackets == FALSE)
+			TempOpen = CONTAINING_RECORD(Curr, OPEN_INSTANCE, OpenInstancesEntry);
+			if (TempOpen->OpenStatus == OpenRunning && TempOpen->SkipSentPackets == FALSE)
 			{
 				NPF_TapExForEachOpen(TempOpen, pNetBufferList);
 			}
-
-			GroupOpen = TempOpen->GroupNext;
 		}
 		/* Release the spin lock no matter what. */
-		NdisReleaseSpinLock(&Open->GroupHead->GroupLock);
+		NdisReleaseSpinLock(&Open->pFiltMod->OpenInstancesLock);
 
-		pNetBufferList->SourceHandle = Open->AdapterHandle;
-		NPFSetNBLChildOpen(pNetBufferList, Open); //save the child open object in the packets
+		pNetBufferList->SourceHandle = Open->pFiltMod->AdapterHandle;
+		RESERVED(pNetBufferList)->ChildOpen = Open; //save the child open object in the packets
 		//SendFlags |= NDIS_SEND_FLAGS_CHECK_FOR_LOOPBACK;
 
 		//
 		// Call the MAC
 		//
 #ifdef HAVE_WFP_LOOPBACK_SUPPORT
-		if (Open->Loopback == TRUE)
+		if (Open->pFiltMod->Loopback == TRUE)
 		{
-			NPF_LoopbackSendNetBufferLists(Open->GroupHead,
+			NPF_LoopbackSendNetBufferLists(Open->pFiltMod,
 				pNetBufferList);
 		}
 		else
 #endif
 #ifdef HAVE_RX_SUPPORT
-			if (Open->SendToRxPath == TRUE)
+			if (Open->pFiltMod->SendToRxPath == TRUE)
 			{
-				IF_LOUD(DbgPrint("NPF_BufferedWrite::SendToRxPath, Open->AdapterHandle=%p, pNetBufferList=%p\n", Open->AdapterHandle, pNetBufferList);)
+				IF_LOUD(DbgPrint("NPF_BufferedWrite::SendToRxPath, Open->pFiltMod->AdapterHandle=%p, pNetBufferList=%p\n", Open->pFiltMod->AdapterHandle, pNetBufferList);)
 				// pretend to receive these packets from network and indicate them to upper layers
 				NdisFIndicateReceiveNetBufferLists(
-					Open->AdapterHandle,
+					Open->pFiltMod->AdapterHandle,
 					pNetBufferList,
 					NDIS_DEFAULT_PORT_NUMBER,
 					1,
@@ -716,11 +757,13 @@ NPF_BufferedWrite(
 			else
 #endif
 			{
-				NdisFSendNetBufferLists(Open->AdapterHandle,
+				NdisFSendNetBufferLists(Open->pFiltMod->AdapterHandle,
 					pNetBufferList,
 					NDIS_DEFAULT_PORT_NUMBER,
 					SendFlags);
 			}
+		// We've sent the packet, so leave it up to SendComplete to free the buffer
+		npBuff = NULL;
 
 		if (Sync)
 		{
@@ -735,18 +778,18 @@ NPF_BufferedWrite(
 				// Malformed header
 				IF_LOUD(DbgPrint("NPF_BufferedWrite: malformed or bogus user buffer, aborting write.\n");)
 
-				result = -1;
+				result = -STATUS_INVALID_PARAMETER;
 				break;
 			}
 
 			pWinpcapHdr = (struct sf_pkthdr *)(UserBuff + Pos);
 
-			if (pWinpcapHdr->caplen == 0 || pWinpcapHdr->caplen > Open->MaxFrameSize || pWinpcapHdr->caplen > (UserBuffSize - Pos - sizeof(*pWinpcapHdr)))
+			if (pWinpcapHdr->caplen == 0 || pWinpcapHdr->caplen > Open->pFiltMod->MaxFrameSize || pWinpcapHdr->caplen > (UserBuffSize - Pos - sizeof(*pWinpcapHdr)))
 			{
 				// Malformed header
 				IF_LOUD(DbgPrint("NPF_BufferedWrite: malformed or bogus user buffer, aborting write.\n");)
 
-				result = -1;
+				result = -STATUS_INVALID_PARAMETER;
 				break;
 			}
 
@@ -767,10 +810,15 @@ NPF_BufferedWrite(
 				CurTicks = KeQueryPerformanceCounter(NULL);
 		}
 	}
+	
+	// Cleanup
+	if (npBuff != NULL) {
+		ExFreePoolWithTag(npBuff, 'WBPN');
+	}
 
 	// Wait the completion of pending sends
 #ifdef HAVE_RX_SUPPORT
-	if (Open->SendToRxPath && pNetBufferList)
+	if (Open->pFiltMod->SendToRxPath && pNetBufferList)
 	{
 		NPF_FreePackets(pNetBufferList);
 	}
@@ -781,7 +829,7 @@ NPF_BufferedWrite(
 	// 
 	// release ownership of the NdisAdapter binding
 	//
-	NPF_StopUsingBinding(Open->GroupHead);
+	NPF_StopUsingBinding(Open->pFiltMod);
 
 	TRACE_EXIT();
 	return result;
@@ -835,6 +883,7 @@ NPF_FreePackets(
 	PNET_BUFFER_LIST    pNetBufList = NetBufferLists;
 	PNET_BUFFER         Currbuff;
 	PMDL                pMdl;
+	PVOID npBuff;
 
 /*	TRACE_ENTER();*/
 
@@ -851,6 +900,10 @@ NPF_FreePackets(
 		while (Currbuff)
 		{
 			pMdl = NET_BUFFER_FIRST_MDL(Currbuff);
+			npBuff = MmGetSystemAddressForMdlSafe(pMdl, LowPagePriority|MdlMappingNoExecute);
+			if (npBuff != NULL) {
+				ExFreePoolWithTag(npBuff, 'WBPN');
+			}
 			NdisFreeMdl(pMdl); //Free MDL
 			Currbuff = NET_BUFFER_NEXT_NB(Currbuff);
 		}
@@ -903,14 +956,14 @@ Return Value:
 --*/
 {
 	POPEN_INSTANCE		ChildOpen;
-	POPEN_INSTANCE		GroupOpen;
+	PSINGLE_LIST_ENTRY Curr;
 	POPEN_INSTANCE		TempOpen;
 	BOOLEAN				FreeBufAfterWrite;
 	PNET_BUFFER_LIST    pNetBufList;
 	PNET_BUFFER_LIST    pNextNetBufList;
 	PNET_BUFFER         Currbuff;
 	PMDL                pMdl;
-	POPEN_INSTANCE		Open = (POPEN_INSTANCE) FilterModuleContext;
+	PNPCAP_FILTER_MODULE pFiltMod = (PNPCAP_FILTER_MODULE) FilterModuleContext;
 
 	TRACE_ENTER();
 
@@ -927,46 +980,34 @@ Return Value:
 		pNextNetBufList = NET_BUFFER_LIST_NEXT_NBL(pNetBufList);
 		NET_BUFFER_LIST_NEXT_NBL(pNetBufList) = NULL;
 
-		if (pNetBufList->SourceHandle == Open->AdapterHandle) //this is our self-sent packets
+		if (pNetBufList->SourceHandle == pFiltMod->AdapterHandle) //this is our self-sent packets
 		{
-			ChildOpen = NPFGetNBLChildOpen(pNetBufList); //get the child open object that sends these packets
+			ChildOpen = RESERVED(pNetBufList)->ChildOpen; //get the child open object that sends these packets
 			FreeBufAfterWrite = RESERVED(pNetBufList)->FreeBufAfterWrite;
 
 			NPF_FreePackets(pNetBufList);
 
 			/* Lock the group */
-			NdisAcquireSpinLock(&Open->GroupLock);
-			// this if should always be false, as Open is always the GroupHead itself, only GroupHead is known by NDIS and get invoked in NPF_SendCompleteEx() function.
-			ASSERT(Open->GroupHead == NULL);
-			if (Open->GroupHead != NULL)
-			{
-				GroupOpen = Open->GroupHead->GroupNext;
-			}
-			else
-			{
-				GroupOpen = Open->GroupNext;
-			}
+			NdisAcquireSpinLock(&pFiltMod->OpenInstancesLock);
 
-			while (GroupOpen != NULL)
+			for (Curr = pFiltMod->OpenInstances.Next; Curr != NULL; Curr = Curr->Next)
 			{
-				TempOpen = GroupOpen;
+				TempOpen = CONTAINING_RECORD(Curr, OPEN_INSTANCE, OpenInstancesEntry);
 				if (ChildOpen == TempOpen) //only indicate the specific child open object
 				{
 					NPF_SendCompleteExForEachOpen(TempOpen, FreeBufAfterWrite);
 					break;
 				}
 
-				GroupOpen = TempOpen->GroupNext;
-
 			}
 			/* Release the spin lock no matter what. */
-			NdisReleaseSpinLock(&Open->GroupLock);
+			NdisReleaseSpinLock(&pFiltMod->OpenInstancesLock);
 		}
 		else
 		{
 			// Send complete the NBLs.  If you removed any NBLs from the chain, make
 			// sure the chain isn't empty (i.e., NetBufferLists!=NULL).
-			NdisFSendNetBufferListsComplete(Open->AdapterHandle, pNetBufList, SendCompleteFlags);
+			NdisFSendNetBufferListsComplete(pFiltMod->AdapterHandle, pNetBufList, SendCompleteFlags);
 		}
 
 		pNetBufList = pNextNetBufList;
@@ -983,7 +1024,6 @@ NPF_SendCompleteExForEachOpen(
 	IN BOOLEAN FreeBufAfterWrite
 	)
 {
-	BOOLEAN CompletePause = FALSE;
 	//TRACE_ENTER();
 
 	NdisAcquireSpinLock(&Open->OpenInUseLock);
@@ -1031,17 +1071,7 @@ NPF_SendCompleteExForEachOpen(
 		//TRACE_EXIT();
 	}
 
-	if (Open->Multiple_Write_Counter == 0 && Open->TransmitPendingPackets == 0 && Open->GroupHead->PausePending)
-	{
-		CompletePause = TRUE;
-	}
-
 	NdisReleaseSpinLock(&Open->OpenInUseLock);
-
-	if (CompletePause)
-	{
-		NdisFPauseComplete(Open->AdapterHandle);
-	}
 }
 
 //-------------------------------------------------------------------
@@ -1049,7 +1079,7 @@ NPF_SendCompleteExForEachOpen(
 #ifdef HAVE_WFP_LOOPBACK_SUPPORT
 VOID
 NPF_LoopbackSendNetBufferLists(
-	IN POPEN_INSTANCE Open,
+	IN NDIS_HANDLE FilterModuleContext,
 	IN PNET_BUFFER_LIST NetBufferList
 	)
 {
@@ -1059,7 +1089,7 @@ NPF_LoopbackSendNetBufferLists(
 	NPF_WSKSendPacket_NBL(NetBufferList);
 
 	// Call complete function manually just like NDIS callback.
-	NPF_SendCompleteEx(Open, NetBufferList, 0);
+	NPF_SendCompleteEx(FilterModuleContext, NetBufferList, 0);
 
 	TRACE_EXIT();
 }

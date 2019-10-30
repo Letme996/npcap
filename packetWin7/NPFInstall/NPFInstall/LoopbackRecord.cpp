@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -76,6 +76,7 @@ Abstract:
 #define			NPCAP_LOOPBACK_ADAPTER_NAME				NPF_DRIVER_NAME_NORMAL_WIDECHAR L" Loopback Adapter"
 #define			NPCAP_LOOPBACK_APP_NAME					NPF_DRIVER_NAME_NORMAL_WIDECHAR L"_Loopback"
 
+#define BUFSIZE 512
 int g_NpcapAdapterID = -1;
 
 // RAII helper class
@@ -350,8 +351,47 @@ BOOL AddFlagToRegistry(tstring strDeviceName)
 BOOL AddFlagToRegistry_Service(tstring strDeviceName)
 {
 	TRACE_ENTER();
+	BOOL rv = TRUE;
+#ifndef NPF_NPCAP_RUN_IN_WINPCAP_MODE
+	/* If this is *not* the WinPcap-API compatible build, then it's the native
+	 * build, which is responsible for installing and recording the loopback
+	 * interface so that both drivers can access it. */
+	HKEY hKey;
+	DWORD type;
+	char buffer[BUFSIZE];
+	DWORD size = sizeof(buffer);
+	DWORD dwWinPcapMode = 0;
+
+
+	if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, NPCAP_SERVICE_REG_KEY_NAME _T("\\Parameters"), 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+	{
+		if (RegQueryValueExA(hKey, "WinPcapCompatible", 0, &type,  (LPBYTE)buffer, &size) == ERROR_SUCCESS && type == REG_DWORD)
+		{
+			dwWinPcapMode = *((DWORD *) buffer);
+		}
+		else
+		{
+			TRACE_PRINT1("RegQueryValueExA(WinPcapCompatible) failed or not REG_DWORD: %#x\n", GetLastError());
+			dwWinPcapMode = 0;
+		}
+
+		RegCloseKey(hKey);
+	}
+	else
+	{
+		TRACE_PRINT2("%s\\Parameters) failed: %#x\n", NPCAP_SERVICE_REG_KEY_NAME, GetLastError());
+		dwWinPcapMode = 0;
+	}
+
+	if (dwWinPcapMode != 0) {
+		rv = WriteStrToRegistry(_T("SYSTEM\\CurrentControlSet\\Services\\npf\\Parameters"), NPCAP_REG_LOOPBACK_VALUE_NAME, tstring(_T("\\Device\\") + strDeviceName).c_str(), KEY_WRITE);
+	}
+#endif /* ifndef NPF_NPCAP_RUN_IN_WINPCAP_MODE */
+
+	rv = WriteStrToRegistry(NPCAP_SERVICE_REG_KEY_NAME _T("\\Parameters"), NPCAP_REG_LOOPBACK_VALUE_NAME, tstring(_T("\\Device\\") + strDeviceName).c_str(), KEY_WRITE) && rv;
+
 	TRACE_EXIT();
-	return WriteStrToRegistry(NPCAP_SERVICE_REG_KEY_NAME _T("\\Parameters"), NPCAP_REG_LOOPBACK_VALUE_NAME, tstring(_T("\\Device\\") + strDeviceName).c_str(), KEY_WRITE);
+	return rv;
 }
 
 BOOL RecordLoopbackDevice(int iNpcapAdapterID)
@@ -380,4 +420,55 @@ BOOL RecordLoopbackDevice(int iNpcapAdapterID)
 
 	TRACE_EXIT();
 	return TRUE;
+}
+
+BOOL EraseLoopbackRecord()
+{
+	TRACE_ENTER();
+	BOOL rv = TRUE;
+#ifndef NPF_NPCAP_RUN_IN_WINPCAP_MODE
+	HKEY hKey;
+	DWORD type;
+	char buffer[BUFSIZE];
+	DWORD size = sizeof(buffer);
+	DWORD dwWinPcapMode = 0;
+
+	if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, NPCAP_SERVICE_REG_KEY_NAME _T("\\Parameters"), 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+	{
+		if (RegQueryValueExA(hKey, "WinPcapCompatible", 0, &type,  (LPBYTE)buffer, &size) == ERROR_SUCCESS && type == REG_DWORD)
+		{
+			dwWinPcapMode = *((DWORD *) buffer);
+		}
+		else
+		{
+			TRACE_PRINT1("RegQueryValueExA(WinPcapCompatible) failed or not REG_DWORD: %#x\n", GetLastError());
+			dwWinPcapMode = 0;
+		}
+
+		RegCloseKey(hKey);
+	}
+	else
+	{
+		TRACE_PRINT2("%s\\Parameters) failed: %#x\n", NPCAP_SERVICE_REG_KEY_NAME, GetLastError());
+		dwWinPcapMode = 0;
+	}
+
+	if (dwWinPcapMode != 0 && !DeleteValueFromRegistry(_T("SYSTEM\\CurrentControlSet\\Services\\npf\\Parameters"), NPCAP_REG_LOOPBACK_VALUE_NAME))
+	{
+		rv = FALSE;
+	}
+#endif /* ifndef NPF_NPCAP_RUN_IN_WINPCAP_MODE */
+
+	if (!DeleteValueFromRegistry(NPCAP_REG_KEY_NAME, NPCAP_REG_LOOPBACK_VALUE_NAME))
+	{
+		rv = FALSE;
+	}
+
+	if (!DeleteValueFromRegistry(NPCAP_SERVICE_REG_KEY_NAME _T("\\Parameters"), NPCAP_REG_LOOPBACK_VALUE_NAME))
+	{
+		rv = FALSE;
+	}
+
+	TRACE_EXIT();
+	return rv;
 }

@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -138,11 +138,11 @@ ADAPTER_INFO, *PADAPTER_INFO;
 //
 VOID PacketLoadLibrariesDynamically();
 void PacketPopulateAdaptersInfoList();
-BOOL PacketGetFileVersion(LPTSTR FileName, PCHAR VersionBuff, UINT VersionBuffLen);
+BOOL PacketGetFileVersion(LPCTSTR FileName, PCHAR VersionBuff, UINT VersionBuffLen);
 PADAPTER_INFO PacketFindAdInfo(PCHAR AdapterName);
 BOOLEAN PacketUpdateAdInfo(PCHAR AdapterName);
 BOOLEAN IsFireWire(TCHAR *AdapterDesc);
-LPADAPTER PacketOpenAdapterNPF(PCHAR AdapterName);
+LPADAPTER PacketOpenAdapterNPF(LPCSTR AdapterName);
 
 #ifndef _WINNT4
 

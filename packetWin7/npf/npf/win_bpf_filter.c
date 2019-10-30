@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -113,31 +113,105 @@
 		 (((u_int32)(((u_char*)p)[2])) << 8 ) |\
 		 (((u_int32)(((u_char*)p)[3])) << 0 ))
 
-#ifdef HAVE_BUGGY_TME_SUPPORT
-u_int bpf_filter(pc, p, wirelen, buflen, mem_ex, tme, time_ref)
-register struct bpf_insn * pc;
-register u_char* p;
-u_int wirelen;
-register u_int buflen;
-PMEM_TYPE mem_ex;
-PTME_CORE tme;
-struct time_conv* time_ref;
-#else  //HAVE_BUGGY_TME_SUPPORT
+#ifdef WIN_NT_DRIVER
+#define MDLIDX(len, p, k, buf) \
+{ \
+	NdisQueryMdl(p, &buf, &len, NormalPagePriority); \
+	if (buf == NULL) \
+		return 0; \
+	while (k >= len) { \
+		k -= len; \
+		p = p->Next; \
+		if (p == NULL) \
+			return 0; \
+		NdisQueryMdl(p, &buf, &len, NormalPagePriority); \
+		if (buf == NULL) \
+			return 0; \
+	} \
+}
+
+u_int32 xword(PMDL p, u_int32 k, int *err)
+{
+	size_t len, len0;
+	u_char *CurBuf, *NextBuf;
+	PMDL p0;
+
+	*err = 1;
+	MDLIDX(len, p, k, CurBuf);
+	CurBuf += k;
+	if (len - k >= 4) {
+		*err = 0;
+		return EXTRACT_LONG(CurBuf);
+	}
+	p0 = p->Next;
+	if (p0 == NULL)
+		return 0;
+	NdisQueryMdl(p0, &NextBuf, &len0, NormalPagePriority);
+	if (NextBuf == NULL || (len - k) + len0 < 4)
+		return 0;
+	*err = 0;
+
+	switch (len - k) {
+	case 1:
+		return (CurBuf[0] << 24) | (NextBuf[0] << 16) | (NextBuf[1] << 8) | NextBuf[2];
+	case 2:
+		return (CurBuf[0] << 24) | (CurBuf[1] << 16) | (NextBuf[0] << 8) | NextBuf[1];
+	default:
+		return (CurBuf[0] << 24) | (CurBuf[1] << 16) | (CurBuf[2] << 8) | NextBuf[0];
+	}
+}
+
+u_int32 xhalf(PMDL p, u_int32 k, int *err)
+{
+	size_t len, len0;
+	u_char *CurBuf, *NextBuf;
+	PMDL p0;
+
+	*err = 1;
+	MDLIDX(len, p, k, CurBuf);
+	CurBuf += k;
+	if (len - k >= 2) {
+		*err = 0;
+		return EXTRACT_SHORT(CurBuf);
+	}
+	p0 = p->Next;
+	if (p0 == NULL)
+		return 0;
+	NdisQueryMdl(p0, &NextBuf, &len0, NormalPagePriority);
+	if (NextBuf == NULL || len0 < 1)
+		return 0;
+	*err = 0;
+
+	return (CurBuf[0] << 8) | NextBuf[0];
+}
+
+u_int32 xbyte(PMDL p, u_int32 k, int *err)
+{
+	size_t len;
+	u_char *CurBuf;
+
+	*err = 1;
+	MDLIDX(len, p, k, CurBuf);
+	*err = 0;
+
+	return CurBuf[k];
+}
+
+u_int bpf_filter(struct bpf_insn *pc, PMDL p, u_int data_offset, u_int wirelen)
+#else
 u_int bpf_filter(pc, p, wirelen, buflen)
-register struct bpf_insn * pc;
-register u_char* p;
+register struct bpf_insn *pc;
+register u_char *p;
 u_int wirelen;
 register u_int buflen;
-#endif //HAVE_BUGGY_TME_SUPPORT
+#endif //WIN_NT_DRIVER
 {
 	register u_int32 A, X;
 	register bpf_u_int32 k;
 
-#ifdef HAVE_BUGGY_TME_SUPPORT
-	u_int32 j, tmp;
-	u_short tmp2;
-#endif //HAVE_BUGGY_TME_SUPPORT
-
+#ifdef WIN_NT_DRIVER
+	int merr = 0;
+#endif
 	int mem[BPF_MEMWORDS];
 
 	RtlZeroMemory(mem, sizeof(mem));
@@ -166,29 +240,47 @@ register u_int buflen;
 
 		case BPF_LD|BPF_W|BPF_ABS:
 			k = pc->k;
-			if (k >= buflen || k + sizeof(int) > buflen)
-			{
+#ifndef WIN_NT_DRIVER
+			if (k >= buflen || k + sizeof(int) > buflen) {
 				return 0;
 			}
 			A = EXTRACT_LONG(&p[k]);
+#else
+			A = xword(p, k + data_offset, &merr);
+			if (merr != 0) {
+				return 0;
+			}
+#endif //WIN_NT_DRIVER
 			continue;
 
 		case BPF_LD|BPF_H|BPF_ABS:
 			k = pc->k;
-			if (k >= buflen || k + sizeof(short) > buflen)
-			{
+#ifndef WIN_NT_DRIVER
+			if (k >= buflen || k + sizeof(short) > buflen) {
 				return 0;
 			}
 			A = EXTRACT_SHORT(&p[k]);
+#else
+			A = xhalf(p, k + data_offset, &merr);
+			if (merr != 0) {
+				return 0;
+			}
+#endif //WIN_NT_DRIVER
 			continue;
 
 		case BPF_LD|BPF_B|BPF_ABS:
 			k = pc->k;
-			if (k >= buflen)
-			{
+#ifndef WIN_NT_DRIVER
+			if (k >= buflen) {
 				return 0;
 			}
 			A = p[k];
+#else
+			A = xbyte(p, k + data_offset, &merr);
+			if (merr != 0) {
+				return 0;
+			}
+#endif //WIN_NT_DRIVER
 			continue;
 
 		case BPF_LD|BPF_W|BPF_LEN:
@@ -201,38 +293,63 @@ register u_int buflen;
 
 		case BPF_LD|BPF_W|BPF_IND:
 			k = X + pc->k;
-			if (k >= buflen || k + sizeof(int) > buflen)
-			{
+#ifndef WIN_NT_DRIVER
+			if (k >= buflen || k + sizeof(int) > buflen) {
 				return 0;
 			}
 			A = EXTRACT_LONG(&p[k]);
+#else
+			A = xword(p, k + data_offset, &merr);
+			if (merr != 0) {
+				return 0;
+			}
+#endif //WIN_NT_DRIVER
 			continue;
 
 		case BPF_LD|BPF_H|BPF_IND:
 			k = X + pc->k;
-			if (k >= buflen || k + sizeof(short) > buflen)
-			{
+#ifndef WIN_NT_DRIVER
+			if (k >= buflen || k + sizeof(short) > buflen) {
 				return 0;
 			}
 			A = EXTRACT_SHORT(&p[k]);
+#else
+			A = xhalf(p, k + data_offset, &merr);
+			if (merr != 0) {
+				return 0;
+			}
+#endif //WIN_NT_DRIVER
 			continue;
 
 		case BPF_LD|BPF_B|BPF_IND:
 			k = X + pc->k;
-			if (k >= buflen)
-			{
+#ifndef WIN_NT_DRIVER
+			if (k >= buflen) {
 				return 0;
 			}
 			A = p[k];
+#else
+			A = xbyte(p, k + data_offset, &merr);
+			if (merr != 0) {
+				return 0;
+			}
+#endif //WIN_NT_DRIVER
 			continue;
 
 		case BPF_LDX|BPF_MSH|BPF_B:
 			k = pc->k;
-			if (k >= buflen)
-			{
+#ifndef WIN_NT_DRIVER
+			if (k >= buflen) {
 				return 0;
 			}
-			X = (p[pc->k] & 0xf) << 2;
+			X = p[k];
+#else
+			X = xbyte(p, k + data_offset, &merr);
+			if (merr != 0) {
+				return 0;
+			}
+#endif //WIN_NT_DRIVER
+			X = (X & 0xf) << 2;
 			continue;
 
 		case BPF_LD|BPF_IMM:
@@ -251,68 +368,6 @@ register u_int buflen;
 			X = mem[pc->k];
 			continue;
 
-#ifdef HAVE_BUGGY_TME_SUPPORT
-			//
-			// these instructions use the TME extensions,
-			// not supported on x86-64 and IA64 architectures.
-			//
-
-			/* LD NO PACKET INSTRUCTIONS */
-
-		case BPF_LD|BPF_MEM_EX_IMM|BPF_B:
-			A = mem_ex->buffer[pc->k];
-			continue;
-
-		case BPF_LDX|BPF_MEM_EX_IMM|BPF_B:
-			X = mem_ex->buffer[pc->k];
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IMM|BPF_H:
-			A = EXTRACT_SHORT(&mem_ex->buffer[pc->k]);
-			continue;
-
-		case BPF_LDX|BPF_MEM_EX_IMM|BPF_H:
-			X = EXTRACT_SHORT(&mem_ex->buffer[pc->k]);
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IMM|BPF_W:
-			A = EXTRACT_LONG(&mem_ex->buffer[pc->k]);
-			continue;
-
-		case BPF_LDX|BPF_MEM_EX_IMM|BPF_W:
-			X = EXTRACT_LONG(&mem_ex->buffer[pc->k]);
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IND|BPF_B:
-			k = X + pc->k;
-			if ((int32)k >= (int32)mem_ex->size)
-			{
-				return 0;
-			}
-			A = mem_ex->buffer[k];
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IND|BPF_H:
-			k = X + pc->k;
-			if ((int32)(k + 1) >= (int32)mem_ex->size)
-			{
-				return 0;
-			}
-			A = EXTRACT_SHORT((uint32 *)&mem_ex->buffer[k]);
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IND|BPF_W:
-			k = X + pc->k;
-			if ((int32)(k + 3) >= (int32)mem_ex->size)
-			{
-				return 0;
-			}
-			A = EXTRACT_LONG((uint32 *)&mem_ex->buffer[k]);
-			continue;
-			/* END LD NO PACKET INSTRUCTIONS */
-
-#endif //HAVE_BUGGY_TME_SUPPORT
-
 		case BPF_ST:
 			mem[pc->k] = A;
 			continue;
@@ -320,59 +375,6 @@ register u_int buflen;
 		case BPF_STX:
 			mem[pc->k] = X;
 			continue;
-
-#ifdef HAVE_BUGGY_TME_SUPPORT
-			//
-			// these instructions use the TME extensions,
-			// not supported on x86-64 and IA64 architectures.
-			//
-
-			/* STORE INSTRUCTIONS */
-
-		case BPF_ST|BPF_MEM_EX_IMM|BPF_B:
-			mem_ex->buffer[pc->k] = (uint8)A;
-			continue;
-
-		case BPF_STX|BPF_MEM_EX_IMM|BPF_B:
-			mem_ex->buffer[pc->k] = (uint8)X;
-			continue;
-
-		case BPF_ST|BPF_MEM_EX_IMM|BPF_W:
-			tmp = A;
-			*(uint32 *)&(mem_ex->buffer[pc->k]) = EXTRACT_LONG(&tmp);
-			continue;
-
-		case BPF_STX|BPF_MEM_EX_IMM|BPF_W:
-			tmp = X;
-			*(uint32 *)&(mem_ex->buffer[pc->k]) = EXTRACT_LONG(&tmp);
-			continue;
-
-		case BPF_ST|BPF_MEM_EX_IMM|BPF_H:
-			tmp2 = (uint16)A;
-			*(uint16 *)&mem_ex->buffer[pc->k] = EXTRACT_SHORT(&tmp2);
-			continue;
-
-		case BPF_STX|BPF_MEM_EX_IMM|BPF_H:
-			tmp2 = (uint16)X;
-			*(uint16 *)&mem_ex->buffer[pc->k] = EXTRACT_SHORT(&tmp2);
-			continue;
-
-		case BPF_ST|BPF_MEM_EX_IND|BPF_B:
-			mem_ex->buffer[pc->k + X] = (uint8)A;
-
-		case BPF_ST|BPF_MEM_EX_IND|BPF_W:
-			tmp = A;
-			*(uint32 *)&mem_ex->buffer[pc->k + X] = EXTRACT_LONG(&tmp);
-			continue;
-
-		case BPF_ST|BPF_MEM_EX_IND|BPF_H:
-			tmp2 = (uint16)A;
-			*(uint16 *)&mem_ex->buffer[pc->k + X] = EXTRACT_SHORT(&tmp2);
-			continue;
-
-			/* END STORE INSTRUCTIONS */
-
-#endif //HAVE_BUGGY_TME_SUPPORT
 
 		case BPF_JMP|BPF_JA:
 			pc += pc->k;
@@ -487,549 +489,15 @@ register u_int buflen;
 		case BPF_MISC|BPF_TXA:
 			A = X;
 			continue;
-
-#ifdef HAVE_BUGGY_TME_SUPPORT
-			//
-			// these instructions use the TME extensions,
-			// not supported on x86-64 and IA64 architectures.
-			//
-
-			/* TME INSTRUCTIONS */
-
-		case BPF_MISC|BPF_TME|BPF_LOOKUP:
-			j = lookup_frontend(mem_ex, tme, pc->k, time_ref);
-			if (j == TME_ERROR)
-				return 0;	
-			pc += (j == TME_TRUE) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_MISC|BPF_TME|BPF_EXECUTE:
-			if (execute_frontend(mem_ex, tme, wirelen, pc->k) == TME_ERROR)
-				return 0;
-			continue;
-
-		case BPF_MISC|BPF_TME|BPF_SET_ACTIVE:
-			if (set_active_tme_block(tme, pc->k) == TME_ERROR)
-				return 0;
-			continue;
-
-		case BPF_MISC|BPF_TME|BPF_GET_REGISTER_VALUE:
-			if (get_tme_block_register(&tme->block_data[tme->working], mem_ex, pc->k, &j) == TME_ERROR)
-				return 0;
-			A = j;
-			continue;
-
-		case BPF_MISC|BPF_TME|BPF_SET_REGISTER_VALUE:
-			if (set_tme_block_register(&tme->block_data[tme->working], mem_ex, pc->k, A, FALSE) == TME_ERROR)
-				return 0;
-			continue;
-
-			/* END TME INSTRUCTIONS */
-#endif //HAVE_BUGGY_TME_SUPPORT
 		}
 	}
 }
 
 //-------------------------------------------------------------------
 
-#ifdef HAVE_BUGGY_TME_SUPPORT
-u_int bpf_filter_with_2_buffers(pc, p, pd, headersize, wirelen, buflen, mem_ex, tme, time_ref)
-register struct bpf_insn * pc;
-register u_char* p;
-register u_char* pd;
-register int headersize; 
-u_int wirelen;
-register u_int buflen;
-PMEM_TYPE mem_ex;
-PTME_CORE tme;
-struct time_conv* time_ref;
-#else //HAVE_BUGGY_TME_SUPPORT
-u_int bpf_filter_with_2_buffers(pc, p, pd, headersize, wirelen, buflen)
-register struct bpf_insn * pc;
-register u_char* p;
-register u_char* pd;
-register int headersize; 
-u_int wirelen;
-register u_int buflen;
-#endif //HAVE_BUGGY_TME_SUPPORT
-{
-	register u_int32 A, X;
-	register int k;
-	int mem[BPF_MEMWORDS];
-#ifdef HAVE_BUGGY_TME_SUPPORT
-	u_int32 j, tmp;
-	u_short tmp2;
-#endif //HAVE_BUGGY_TME_SUPPORT
-
-	RtlZeroMemory(mem, sizeof(mem));
-
-	if (pc == 0)
-	/*
-	* No filter means accept all.
-	*/
-		return (u_int) - 1;
-	A = 0;
-	X = 0;
-	--pc;
-	while (1)
-	{
-		++pc;
-		switch (pc->code)
-		{
-		default:
-			return 0;
-
-		case BPF_RET|BPF_K:
-			return (u_int)pc->k;
-
-		case BPF_RET|BPF_A:
-			return (u_int)A;
-
-		case BPF_LD|BPF_W|BPF_ABS:
-			k = pc->k;
-			if (k + 4 > (int)buflen)
-			{
-				return 0;
-			}
-
-			if (k + 4 <= headersize)
-				A = EXTRACT_LONG(&p[k]);
-			else if (k + 3 == headersize)
-			{
-				A = (u_int32)*((u_char *)p + k) << 24 | (u_int32)*((u_char *)p + k + 1) << 16 | (u_int32)*((u_char *)p + k + 2) << 8 | (u_int32)*((u_char *)pd + k - headersize);
-			}
-			else if (k + 2 == headersize)
-			{
-				A = (u_int32)*((u_char *)p + k) << 24 | (u_int32)*((u_char *)p + k + 1) << 16 | (u_int32)*((u_char *)pd + k - headersize) << 8 | (u_int32)*((u_char *)pd + k - headersize + 1);
-			}
-			else if (k + 1 == headersize)
-			{
-				A = (u_int32)*((u_char *)p + k) << 24 | (u_int32)*((u_char *)pd + k - headersize + 1) << 16 | (u_int32)*((u_char *)pd + k - headersize + 2) << 8 | (u_int32)*((u_char *)pd + k - headersize + 3);
-			}
-			else
-				A = EXTRACT_LONG(&pd[k - headersize]);
-
-			continue;
-
-		case BPF_LD|BPF_H|BPF_ABS:
-			k = pc->k;
-			if (k + sizeof(short) > buflen)
-			{
-				return 0;
-			}
-
-			if (k + 2 <= headersize)
-				A = EXTRACT_SHORT(&p[k]);
-			else if (k + 1 == headersize)
-			{
-				A = (u_short)*((u_char *)p + k) << 8 | (u_short)*((u_char *)pd + k - headersize);
-			}
-			else
-				A = EXTRACT_SHORT(&pd[k - headersize]);
-
-			continue;
-
-		case BPF_LD|BPF_B|BPF_ABS:
-			k = pc->k;
-			if ((int)k >= (int)buflen)
-			{
-				return 0;
-			}
-
-			if (k + (int) sizeof(char) <= headersize)
-				A = p[k];
-			else
-				A = pd[k - headersize];
-
-			continue;
-
-		case BPF_LD|BPF_W|BPF_LEN:
-			A = wirelen;
-			continue;
-
-		case BPF_LDX|BPF_W|BPF_LEN:
-			X = wirelen;
-			continue;
-
-		case BPF_LD|BPF_W|BPF_IND:
-			k = X + pc->k;
-			if (k + sizeof(int) > buflen)
-			{
-				return 0;
-			}
-
-			if (k + 4 <= headersize)
-				A = EXTRACT_LONG(&p[k]);
-			else if (k + 3 == headersize)
-			{
-				A = (u_int32)*((u_char *)p + k) << 24 | (u_int32)*((u_char *)p + k + 1) << 16 | (u_int32)*((u_char *)p + k + 2) << 8 | (u_int32)*((u_char *)pd + k - headersize);
-			}
-			else if (k + 2 == headersize)
-			{
-				A = (u_int32)*((u_char *)p + k) << 24 | (u_int32)*((u_char *)p + k + 1) << 16 | (u_int32)*((u_char *)pd + k - headersize) << 8 | (u_int32)*((u_char *)pd + k - headersize + 1);
-			}
-			else if (k + 1 == headersize)
-			{
-				A = (u_int32)*((u_char *)p + k) << 24 | (u_int32)*((u_char *)pd + k - headersize + 1) << 16 | (u_int32)*((u_char *)pd + k - headersize + 2) << 8 | (u_int32)*((u_char *)pd + k - headersize + 3);
-			}
-			else
-				A = EXTRACT_LONG(&pd[k - headersize]);
-
-			continue;
-
-		case BPF_LD|BPF_H|BPF_IND:
-			k = X + pc->k;
-			if (k + 2 > (int)buflen)
-			{
-				return 0;
-			}
-
-			if (k + 2 <= headersize)
-				A = EXTRACT_SHORT(&p[k]);
-			else if (k + 1 == headersize)
-			{
-				A = (u_short)*((u_char *)p + k) << 8 | (u_short)*((u_char *)pd + k - headersize);
-			}
-			else
-				A = EXTRACT_SHORT(&pd[k - headersize]);
-
-			continue;
-
-		case BPF_LD|BPF_B|BPF_IND:
-			k = X + pc->k;
-			if ((int)k >= (int)buflen)
-			{
-				return 0;
-			}
-
-			if (k + 1 <= headersize)
-				A = p[k];
-			else
-				A = pd[k - headersize];
-
-			continue;
-
-		case BPF_LDX|BPF_MSH|BPF_B:
-			k = pc->k;
-			if ((int)k >= (int)buflen)
-			{
-				return 0;
-			}
-
-			if (k + 1 <= headersize)
-				X = (p[k] & 0xf) << 2;
-			else
-				X = (pd[k - headersize] & 0xf) << 2;
-
-			continue;
-
-		case BPF_LD|BPF_IMM:
-			A = pc->k;
-			continue;
-
-		case BPF_LDX|BPF_IMM:
-			X = pc->k;
-			continue;
-
-		case BPF_LD|BPF_MEM:
-			A = mem[pc->k];
-			continue;
-
-		case BPF_LDX|BPF_MEM:
-			X = mem[pc->k];
-			continue;
-
-#ifdef HAVE_BUGGY_TME_SUPPORT
-			//
-			// these instructions use the TME extensions,
-			// not supported on x86-64 and IA64 architectures.
-			//
-
-			/* LD NO PACKET INSTRUCTIONS */
-
-		case BPF_LD|BPF_MEM_EX_IMM|BPF_B:
-			A = mem_ex->buffer[pc->k];
-			continue;
-
-		case BPF_LDX|BPF_MEM_EX_IMM|BPF_B:
-			X = mem_ex->buffer[pc->k];
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IMM|BPF_H:
-			A = EXTRACT_SHORT(&mem_ex->buffer[pc->k]);
-			continue;
-
-		case BPF_LDX|BPF_MEM_EX_IMM|BPF_H:
-			X = EXTRACT_SHORT(&mem_ex->buffer[pc->k]);
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IMM|BPF_W:
-			A = EXTRACT_LONG(&mem_ex->buffer[pc->k]);
-			continue;
-
-		case BPF_LDX|BPF_MEM_EX_IMM|BPF_W:
-			X = EXTRACT_LONG(&mem_ex->buffer[pc->k]);
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IND|BPF_B:
-			k = X + pc->k;
-			if ((int32)k >= (int32)mem_ex->size)
-			{
-				return 0;
-			}
-			A = mem_ex->buffer[k];
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IND|BPF_H:
-			k = X + pc->k;
-			if ((int32)(k + 1) >= (int32)mem_ex->size)
-			{
-				return 0;
-			}
-			A = EXTRACT_SHORT((uint32 *)&mem_ex->buffer[k]);
-			continue;
-
-		case BPF_LD|BPF_MEM_EX_IND|BPF_W:
-			k = X + pc->k;
-			if ((int32)(k + 3) >= (int32)mem_ex->size)
-			{
-				return 0;
-			}
-			A = EXTRACT_LONG((uint32 *)&mem_ex->buffer[k]);
-			continue;
-
-			/* END LD NO PACKET INSTRUCTIONS */
-
-#endif //HAVE_BUGGY_TME_SUPPORT
-
-		case BPF_ST:
-			mem[pc->k] = A;
-			continue;
-
-		case BPF_STX:
-			mem[pc->k] = X;
-			continue;
-
-#ifdef HAVE_BUGGY_TME_SUPPORT
-			//
-			// these instructions use the TME extensions,
-			// not supported on x86-64 and IA64 architectures.
-			//
-
-			/* STORE INSTRUCTIONS */
-
-		case BPF_ST|BPF_MEM_EX_IMM|BPF_B:
-			mem_ex->buffer[pc->k] = (uint8)A;
-			continue;
-
-		case BPF_STX|BPF_MEM_EX_IMM|BPF_B:
-			mem_ex->buffer[pc->k] = (uint8)X;
-			continue;
-
-		case BPF_ST|BPF_MEM_EX_IMM|BPF_W:
-			tmp = A;
-			*(uint32 *)&(mem_ex->buffer[pc->k]) = EXTRACT_LONG(&tmp);
-			continue;
-
-		case BPF_STX|BPF_MEM_EX_IMM|BPF_W:
-			tmp = X;
-			*(uint32 *)&(mem_ex->buffer[pc->k]) = EXTRACT_LONG(&tmp);
-			continue;
-
-		case BPF_ST|BPF_MEM_EX_IMM|BPF_H:
-			tmp2 = (uint16)A;
-			*(uint16 *)&mem_ex->buffer[pc->k] = EXTRACT_SHORT(&tmp2);
-			continue;
-
-		case BPF_STX|BPF_MEM_EX_IMM|BPF_H:
-			tmp2 = (uint16)X;
-			*(uint16 *)&mem_ex->buffer[pc->k] = EXTRACT_SHORT(&tmp2);
-			continue;
-
-		case BPF_ST|BPF_MEM_EX_IND|BPF_B:
-			mem_ex->buffer[pc->k + X] = (uint8)A;
-
-		case BPF_ST|BPF_MEM_EX_IND|BPF_W:
-			tmp = A;
-			*(uint32 *)&mem_ex->buffer[pc->k + X] = EXTRACT_LONG(&tmp);
-			continue;
-
-		case BPF_ST|BPF_MEM_EX_IND|BPF_H:
-			tmp2 = (uint16)A;
-			*(uint16 *)&mem_ex->buffer[pc->k + X] = EXTRACT_SHORT(&tmp2);
-			continue;
-
-			/* END STORE INSTRUCTIONS */
-
-#endif //HAVE_BUGGY_TME_SUPPORT		
-
-		case BPF_JMP|BPF_JA:
-			pc += pc->k;
-			continue;
-
-		case BPF_JMP|BPF_JGT|BPF_K:
-			pc += ((int)A > (int)pc->k) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_JMP|BPF_JGE|BPF_K:
-			pc += ((int)A >= (int)pc->k) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_JMP|BPF_JEQ|BPF_K:
-			pc += ((int)A == (int)pc->k) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_JMP|BPF_JSET|BPF_K:
-			pc += (A & pc->k) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_JMP|BPF_JGT|BPF_X:
-			pc += (A > X) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_JMP|BPF_JGE|BPF_X:
-			pc += (A >= X) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_JMP|BPF_JEQ|BPF_X:
-			pc += (A == X) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_JMP|BPF_JSET|BPF_X:
-			pc += (A & X) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_ALU|BPF_ADD|BPF_X:
-			A += X;
-			continue;
-
-		case BPF_ALU|BPF_SUB|BPF_X:
-			A -= X;
-			continue;
-
-		case BPF_ALU|BPF_MUL|BPF_X:
-			A *= X;
-			continue;
-
-		case BPF_ALU|BPF_DIV|BPF_X:
-			if (X == 0)
-				return 0;
-			A /= X;
-			continue;
-
-		case BPF_ALU|BPF_AND|BPF_X:
-			A &= X;
-			continue;
-
-		case BPF_ALU|BPF_OR|BPF_X:
-			A |= X;
-			continue;
-
-		case BPF_ALU|BPF_LSH|BPF_X:
-			A <<= X;
-			continue;
-
-		case BPF_ALU|BPF_RSH|BPF_X:
-			A >>= X;
-			continue;
-
-		case BPF_ALU|BPF_ADD|BPF_K:
-			A += pc->k;
-			continue;
-
-		case BPF_ALU|BPF_SUB|BPF_K:
-			A -= pc->k;
-			continue;
-
-		case BPF_ALU|BPF_MUL|BPF_K:
-			A *= pc->k;
-			continue;
-
-		case BPF_ALU|BPF_DIV|BPF_K:
-			A /= pc->k;
-			continue;
-
-		case BPF_ALU|BPF_AND|BPF_K:
-			A &= pc->k;
-			continue;
-
-		case BPF_ALU|BPF_OR|BPF_K:
-			A |= pc->k;
-			continue;
-
-		case BPF_ALU|BPF_LSH|BPF_K:
-			A <<= pc->k;
-			continue;
-
-		case BPF_ALU|BPF_RSH|BPF_K:
-			A >>= pc->k;
-			continue;
-
-		case BPF_ALU|BPF_NEG:
-			(int)A = -((int)A);
-			continue;
-
-		case BPF_MISC|BPF_TAX:
-			X = A;
-			continue;
-
-		case BPF_MISC|BPF_TXA:
-			A = X;
-			continue;
-
-#ifdef HAVE_BUGGY_TME_SUPPORT
-			//
-			// these instructions use the TME extensions,
-			// not supported on x86-64 and IA64 architectures.
-			//
-
-			/* TME INSTRUCTIONS */
-
-		case BPF_MISC|BPF_TME|BPF_LOOKUP:
-			j = lookup_frontend(mem_ex, tme, pc->k, time_ref);
-			if (j == TME_ERROR)
-				return 0;	
-			pc += (j == TME_TRUE) ? pc->jt : pc->jf;
-			continue;
-
-		case BPF_MISC|BPF_TME|BPF_EXECUTE:
-			if (execute_frontend(mem_ex, tme, wirelen, pc->k) == TME_ERROR)
-				return 0;
-			continue;
-
-		case BPF_MISC|BPF_TME|BPF_SET_ACTIVE:
-			if (set_active_tme_block(tme, pc->k) == TME_ERROR)
-				return 0;
-			continue;
-
-		case BPF_MISC|BPF_TME|BPF_GET_REGISTER_VALUE:
-			if (get_tme_block_register(&tme->block_data[tme->working], mem_ex, pc->k, &j) == TME_ERROR)
-				return 0;
-			A = j;
-			continue;
-
-		case BPF_MISC|BPF_TME|BPF_SET_REGISTER_VALUE:
-			if (set_tme_block_register(&tme->block_data[tme->working], mem_ex, pc->k, A, FALSE) == TME_ERROR)
-				return 0;
-			continue;
-
-			/* END TME INSTRUCTIONS */
-
-#endif //HAVE_BUGGY_TME_SUPPORT
-		}
-	}
-}
-
-#ifdef HAVE_BUGGY_TME_SUPPORT
-int bpf_validate(f, len, mem_ex_size)
-struct bpf_insn * f;
-int len;
-uint32 mem_ex_size;	
-#else
 int bpf_validate(f, len)
 struct bpf_insn * f;
 int len;
-#endif //HAVE_BUGGY_TME_SUPPORT
 {
 	register u_int32 i, from;
 	register int j;
@@ -1084,46 +552,8 @@ int len;
 
 		case BPF_ST:
 		case BPF_STX:
-#ifdef HAVE_BUGGY_TME_SUPPORT
-			//
-			// these instructions use the TME extensions,
-			// not supported on x86-64 and IA64 architectures.
-			//
-			if ((p->code & BPF_MEM_EX_IMM) == BPF_MEM_EX_IMM)
-			{
-				/*
-								 * Check if key stores use valid addresses 
-								 */ 
-				switch (BPF_SIZE(p->code))
-				{
-				case BPF_W:
-					if (p->k + 3 >= mem_ex_size)
-						return 0;
-					break;
-
-				case BPF_H:
-					if (p->k + 1 >= mem_ex_size)
-						return 0;
-					break;
-
-				case BPF_B:
-					if (p->k >= mem_ex_size)
-						return 0;
-					break;
-				}
-			}
-			else
-			{
-				if ((p->code & BPF_MEM_EX_IND) != BPF_MEM_EX_IND)
-				{
-					if (p->k >= BPF_MEMWORDS)
-						return 0;
-				}
-			}
-#else // ! HAVE_BUGGY_TME_SUPPORT
 			if (p->k >= BPF_MEMWORDS)
 				return 0;
-#endif // HAVE_BUGGY_TME_SUPPORT
 
 			TRACE_MESSAGE(PACKET_DEBUG_LOUD, "Validating program: no wrong ST memory locations");
 			break;

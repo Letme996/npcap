@@ -39,7 +39,25 @@
  */
 
 #include <signal.h>
-#include "pcap.h"
+#include <pcap.h>
+#include <tchar.h>
+BOOL LoadNpcapDlls()
+{
+    _TCHAR npcap_dir[512];
+    UINT len;
+    len = GetSystemDirectory(npcap_dir, 480);
+    if (!len) {
+        fprintf(stderr, "Error in GetSystemDirectory: %x", GetLastError());
+        return FALSE;
+    }
+    _tcscat_s(npcap_dir, 512, _T("\\Npcap"));
+    if (SetDllDirectory(npcap_dir) == 0) {
+        fprintf(stderr, "Error in SetDllDirectory: %x", GetLastError());
+        return FALSE;
+    }
+    return TRUE;
+}
+
 
 /* Storage data structure used to pass parameters to the threads */
 typedef struct _in_out_adapters
@@ -78,6 +96,13 @@ int main()
 	struct bpf_program fcode;
 	in_out_adapters couple0, couple1;
 
+	/* Load Npcap and its functions. */
+	if (!LoadNpcapDlls())
+	{
+		fprintf(stderr, "Couldn't load Npcap\n");
+		exit(1);
+	}
+
 	/* 
 	 * Retrieve the device list 
 	 */
@@ -100,7 +125,7 @@ int main()
 
 	if(i==0)
 	{
-		printf("\nNo interfaces found! Make sure WinPcap is installed.\n");
+		printf("\nNo interfaces found! Make sure Npcap is installed.\n");
 		return -1;
 	}
 
@@ -176,7 +201,7 @@ int main()
 							 errbuf							// error buffer
 							 )) == NULL)
 	{
-		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", d->description);
+		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by Npcap\n", d->description);
 		/* Free the device list */
 		pcap_freealldevs(alldevs);
 		return -1;
@@ -208,7 +233,7 @@ int main()
 							 errbuf							// error buffer
 							 )) == NULL)
 	{
-		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by WinPcap\n", d->description);
+		fprintf(stderr,"\nUnable to open the adapter. %s is not supported by Npcap\n", d->description);
 		/* Free the device list */
 		pcap_freealldevs(alldevs);
 		return -1;

@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -58,11 +58,13 @@ Abstract:
 
 --*/
 
+#pragma comment(lib, "advpack.lib")
+
 #include "CalloutInstall.h"
 #include "ProtInstall.h"
 #include "debug.h"
 
-#include <SetupAPI.h>
+#include <advpub.h>
 #include <tchar.h>
 
 BOOL isFileExist(TCHAR szFileFullPath[])
@@ -114,9 +116,14 @@ BOOL InstallWFPCallout()
 	}
 
 	TCHAR szCmd[_MAX_PATH * 2];
-	_stprintf_s(szCmd, _MAX_PATH * 2, TEXT("DefaultInstall 132 %s"), szFileFullPath);
-	InstallHinfSection(NULL, NULL, szCmd, 0);
-	TRACE_PRINT1("InstallHinfSection: executing, szCmd = %s.", szCmd);
+	_stprintf_s(szCmd, _MAX_PATH * 2, TEXT("%s,DefaultInstall,,36,N"), szFileFullPath);
+	TRACE_PRINT1("LaunchINFSectionEx: executing, szCmd = %s.", szCmd);
+	if (LaunchINFSectionEx(NULL, NULL, szCmd, 0) == E_FAIL)
+	{
+		TRACE_PRINT("WFP INF install failed!");
+		TRACE_EXIT();
+		return FALSE;
+	}
 
 	TRACE_EXIT();
 	return TRUE;
@@ -148,9 +155,14 @@ BOOL UninstallWFPCallout()
 	}
 
 	TCHAR szCmd[_MAX_PATH * 2];
-	_stprintf_s(szCmd, _MAX_PATH * 2, TEXT("DefaultUninstall 132 %s"), szFileFullPath);
-	InstallHinfSection(NULL, NULL, szCmd, 0);
-	TRACE_PRINT1("InstallHinfSection: executing, szCmd = %s.", szCmd);
+	_stprintf_s(szCmd, _MAX_PATH * 2, TEXT("%s,DefaultUninstall,,36,N"), szFileFullPath);
+	TRACE_PRINT1("LaunchINFSectionEx: executing, szCmd = %s.", szCmd);
+	if (LaunchINFSectionEx(NULL, NULL, szCmd, 0) == E_FAIL)
+	{
+		TRACE_PRINT("WFP INF removal failed!");
+		TRACE_EXIT();
+		return FALSE;
+	}
 
 	TRACE_EXIT();
 	return TRUE;

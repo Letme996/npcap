@@ -36,11 +36,28 @@
 #include <conio.h>
 
 
-#include "..\..\..\Include\packet32.h"
+#include <Packet32.h>
 #include <ntddndis.h>
 
 #define Max_Num_Adapter 10
 
+#include <tchar.h>
+BOOL LoadNpcapDlls()
+{
+	TCHAR npcap_dir[512];
+	UINT len;
+	len = GetSystemDirectory(npcap_dir, 480);
+	if (!len) {
+		fprintf(stderr, "Error in GetSystemDirectory: %x", GetLastError());
+		return FALSE;
+	}
+	_tcscat_s(npcap_dir, 512, TEXT("\\Npcap"));
+	if (SetDllDirectory(npcap_dir) == 0) {
+		fprintf(stderr, "Error in SetDllDirectory: %x", GetLastError());
+		return FALSE;
+	}
+	return TRUE;
+}
 // Prototypes
 
 void PrintPackets(LPPACKET lpPacket);
@@ -72,6 +89,13 @@ char buffer[256000];  // buffer to hold the data coming from the driver
 
 struct bpf_stat stat;
 	
+	/* Load Npcap and its functions. */
+	if (!LoadNpcapDlls())
+	{
+		fprintf(stderr, "Couldn't load Npcap\n");
+		exit(1);
+	}
+
 	//
 	// Obtain the name of the adapters installed on this machine
 	//
@@ -217,7 +241,7 @@ void PrintPackets(LPPACKET lpPacket)
 
 			pLine =pChar;
 
-			printf( "%08lx : ", pChar-base );
+			printf( "%p : ", (void *)(pChar - base));
 
 			ulen=tlen;
 			ulen = ( ulen > 16 ) ? 16 : ulen;

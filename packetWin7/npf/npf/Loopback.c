@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -70,7 +70,6 @@
 // 
 // Global variables
 //
-extern POPEN_INSTANCE g_LoopbackOpenGroupHead; // Loopback adapter open_instance group head, this pointer points to one item in g_arrOpen list.
 extern ULONG g_DltNullMode;
 
 // 
@@ -181,7 +180,6 @@ BOOLEAN
 NPF_IsPacketSelfSent(
 	_In_ PNET_BUFFER_LIST pNetBufferList,
 	_In_ BOOLEAN bIPv4,
-	_Out_ BOOLEAN *pbInnerIPv4,
 	_Out_ UCHAR *puProto
 	)
 {
@@ -193,8 +191,10 @@ NPF_IsPacketSelfSent(
 
 	TRACE_ENTER();
 
+	// We only look at the first NB in the list to determine this, since
+	// our assumption is that all NBs in the NBL share the same origin.
 	pNetBuffer = NET_BUFFER_LIST_FIRST_NB(pNetBufferList);
-	while (pNetBuffer)
+	if (pNetBuffer)
 	{
 		pContiguousData = NdisGetDataBuffer(pNetBuffer,
 			bIPv4 ? IP_HDR_LEN : IPV6_HDR_LEN,
@@ -218,7 +218,6 @@ NPF_IsPacketSelfSent(
 			*puProto = uProto;
 			if (uProto == IPPROTO_NPCAP_LOOPBACK)
 			{
-				*pbInnerIPv4 = bIPv4;
 				TRACE_EXIT();
 				return TRUE;
 			}
@@ -229,7 +228,6 @@ NPF_IsPacketSelfSent(
 			}
 		}
 
-		pNetBuffer = pNetBuffer->Next;
 	}
 
 	TRACE_EXIT();
@@ -250,8 +248,11 @@ NPF_IsICMPProtocolUnreachablePacket(
 
 	TRACE_ENTER();
 
+	// Same reasoning as NPF_IsPacketSelfSent:
+	// We only look at the first NB in the list to determine this, since
+	// our assumption is that all NBs in the NBL share the same origin.
 	pNetBuffer = NET_BUFFER_LIST_FIRST_NB(pNetBufferList);
-	while (pNetBuffer)
+	if (pNetBuffer)
 	{
 		pContiguousData = NdisGetDataBuffer(pNetBuffer,
 			IP_HDR_LEN + ICMP_HDR_LEN,
@@ -286,7 +287,6 @@ NPF_IsICMPProtocolUnreachablePacket(
 			}
 		}
 
-		pNetBuffer = pNetBuffer->Next;
 	}
 
 	TRACE_EXIT();
@@ -356,14 +356,14 @@ NPF_NetworkClassify(
 #endif
 
 {
-	POPEN_INSTANCE GroupOpen;
+	PNPCAP_FILTER_MODULE pLoopbackFilter;
+	PSINGLE_LIST_ENTRY Curr;
 	POPEN_INSTANCE		TempOpen;
 	NTSTATUS			status = STATUS_SUCCESS;
 	UINT32				ipHeaderSize = 0;
 	UINT32				bytesRetreated = 0;
 	UINT32				bytesRetreatedEthernet = 0;
 	BOOLEAN				bIPv4;
-	BOOLEAN				bInnerIPv4;
 	BOOLEAN				bInbound;
 	BOOLEAN				bSelfSent = FALSE;
 	UCHAR				uIPProto;
@@ -374,6 +374,7 @@ NPF_NetworkClassify(
 	PNET_BUFFER_LIST	pNetBufferList = (NET_BUFFER_LIST*) layerData;
 	COMPARTMENT_ID		compartmentID = UNSPECIFIED_COMPARTMENT_ID;
 	FWPS_PACKET_INJECTION_STATE injectionState = FWPS_PACKET_INJECTION_STATE_MAX;
+	PNET_BUFFER_LIST pClonedNetBufferList = NULL;
 
 #if(NTDDI_VERSION >= NTDDI_WIN7)
 	UNREFERENCED_PARAMETER(classifyContext);
@@ -448,213 +449,204 @@ NPF_NetworkClassify(
 		return;
 	}
 
-	// Inbound: Initial offset is at the Transport Header, so retreat the size of the Ethernet Header and IP Header.
-	// Outbound: Initial offset is at the IP Header, so just retreat the size of the Ethernet Header.
-	// We retreated the packet in two phases: 1) retreat the IP Header (if has), 2) clone the packet and retreat the Ethernet Header.
-	// We must NOT retreat the Ethernet Header on the original packet, or this will lead to BAD_POOL_CALLER Bluescreen.
-	bytesRetreated = bInbound ? ipHeaderSize : 0;
-
-	status = NdisRetreatNetBufferListDataStart(pNetBufferList,
-		bytesRetreated,
-		0,
-		NULL,
-		NULL);
-
-	if (status != STATUS_SUCCESS)
-	{
-		TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
-			"NPF_NetworkClassify: NdisRetreatNetBufferListDataStart(bytesRetreated) [status: %#x]\n",
-			status);
-
-		TRACE_EXIT();
-		return;
-	}
-
 	TRACE_MESSAGE2(PACKET_DEBUG_LOUD, "NPF_NetworkClassify: bIPv4 = %d, bInbound = %d\n", bIPv4, bInbound);
 	TRACE_MESSAGE4(PACKET_DEBUG_LOUD, "NPF_NetworkClassify: inFixedValues->layerId = %d, inMetaValues->currentMetadataValues = 0x%x, inMetaValues->ipHeaderSize = %d, inMetaValues->compartmentId = 0x%x\n",
 		inFixedValues->layerId, inMetaValues->currentMetadataValues, inMetaValues->ipHeaderSize, inMetaValues->compartmentId);
 
-	//bSelfSent = NPF_IsPacketSelfSent(pNetBufferList, (BOOLEAN)bIPv4);
-	bSelfSent = bInbound ? NPF_IsPacketSelfSent(pNetBufferList, bIPv4, &bInnerIPv4, &uIPProto) : FALSE;
-	TRACE_MESSAGE1(PACKET_DEBUG_LOUD, "NPF_NetworkClassify: bSelfSent = %d\n", bSelfSent);
+	// Inbound: Initial offset is at the Transport Header, so retreat the size of the Ethernet Header and IP Header.
+	// Outbound: Initial offset is at the IP Header, so just retreat the size of the Ethernet Header.
+	// We retreated the packet in two phases: 1) retreat the IP Header (if has), 2) clone the packet and retreat the Ethernet Header.
+	// We must NOT retreat the Ethernet Header on the original packet, or this will lead to BAD_POOL_CALLER Bluescreen.
+	if (bInbound) {
 
-	if (bInbound && bIPv4 && !bSelfSent && uIPProto == IPPROTO_ICMP)
-	{
-		bICMPProtocolUnreachable = NPF_IsICMPProtocolUnreachablePacket(pNetBufferList);
-		TRACE_MESSAGE1(PACKET_DEBUG_LOUD, "NPF_NetworkClassify: bICMPProtocolUnreachable = %d\n", bICMPProtocolUnreachable);
-		if (bICMPProtocolUnreachable)
-		{
-			TRACE_MESSAGE(PACKET_DEBUG_LOUD,
-				"NPF_NetworkClassify: this packet is the ICMPv4 protocol unreachable error packet caused by our \"nping 127.0.0.1\" command, discard it\n");
+		bytesRetreated += ipHeaderSize;
+		status = NdisRetreatNetBufferListDataStart(pNetBufferList,
+				ipHeaderSize,
+				0,
+				NULL,
+				NULL);
 
-			goto Exit_WSK_IP_Retreated;
-		}
-	}
-
-	if (bSelfSent)
-	{
-		NdisAdvanceNetBufferListDataStart(pNetBufferList,
-			bIPv4 ? IP_HDR_LEN : IPV6_HDR_LEN,
-			FALSE,
-			0);
-	}
-
-	// Here if this NBL is sent by ourself, we will clone it starting from IP header and inject it into Network Layer send path.
-	if (bSelfSent)
-	{
-		PNET_BUFFER_LIST pClonedNetBufferList_Injection;
-		status = FwpsAllocateCloneNetBufferList(pNetBufferList, NULL, NULL, 0, &pClonedNetBufferList_Injection);
 		if (status != STATUS_SUCCESS)
 		{
 			TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
-				"NPF_NetworkClassify: FwpsAllocateCloneNetBufferList(pClonedNetBufferList_Injection) [status: %#x]\n",
-				status);
+					"NPF_NetworkClassify: NdisRetreatNetBufferListDataStart(bytesRetreated) [status: %#x]\n",
+					status);
 
-			goto Exit_WSK_IP_Retreated;
+			TRACE_EXIT();
+			return;
 		}
 
-		if (FWPS_IS_METADATA_FIELD_PRESENT(inMetaValues,
-			FWPS_METADATA_FIELD_COMPARTMENT_ID))
-			compartmentID = (COMPARTMENT_ID)inMetaValues->compartmentId;
 
-		// This cloned NBL will be freed in NPF_NetworkInjectionComplete function.
-		status = FwpsInjectNetworkSendAsync(bInnerIPv4 ? g_InjectionHandle_IPv4 : g_InjectionHandle_IPv6,
-			NULL,
-			0,
-			compartmentID,
-			pClonedNetBufferList_Injection,
-			NPF_NetworkInjectionComplete,
-			NULL);
-		if (status != STATUS_SUCCESS)
+		bSelfSent = NPF_IsPacketSelfSent(pNetBufferList, bIPv4, &uIPProto);
+		TRACE_MESSAGE1(PACKET_DEBUG_LOUD, "NPF_NetworkClassify: bSelfSent = %d\n", bSelfSent);
+
+		if (bIPv4 && !bSelfSent && uIPProto == IPPROTO_ICMP)
 		{
-			TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
-				"NPF_NetworkClassify: FwpsInjectNetworkSendAsync() [status: %#x]\n",
-				status);
-
-			FwpsFreeCloneNetBufferList(pClonedNetBufferList_Injection, 0);
-			goto Exit_WSK_IP_Retreated;
-		}
-
-		// We have successfully re-inject the cloned NBL, so remove this one.
-		classifyOut->actionType = FWP_ACTION_BLOCK;
-		classifyOut->flags |= FWPS_CLASSIFY_OUT_FLAG_ABSORB;
-		classifyOut->rights ^= FWPS_RIGHT_ACTION_WRITE;
-	}
-
-	// We clone this NBL again, for packet reading operation.
-	PNET_BUFFER_LIST pClonedNetBufferList;
-	status = FwpsAllocateCloneNetBufferList(pNetBufferList, NULL, NULL, 0, &pClonedNetBufferList);
-	if (status != STATUS_SUCCESS)
-	{
-		TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
-			"NPF_NetworkClassify: FwpsAllocateCloneNetBufferList() [status: %#x]\n",
-			status);
-
-		goto Exit_WSK_IP_Retreated;
-	}
-
-	bytesRetreatedEthernet = g_DltNullMode ? DLT_NULL_HDR_LEN : ETHER_HDR_LEN;
-	status = NdisRetreatNetBufferListDataStart(pClonedNetBufferList,
-		bytesRetreatedEthernet,
-		0,
-		0,
-		0);
-	if (status != STATUS_SUCCESS)
-	{
-		bytesRetreatedEthernet = 0;
-
-		TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
-			"NPF_NetworkClassify: NdisRetreatNetBufferListDataStart(bytesRetreatedEthernet) [status: %#x]\n",
-			status);
-
-		goto Exit_Packet_Cloned;
-	}
-
-	pNetBuffer = NET_BUFFER_LIST_FIRST_NB(pClonedNetBufferList);
-	while (pNetBuffer)
-	{
-		pContiguousData = NdisGetDataBuffer(pNetBuffer,
-			bytesRetreatedEthernet,
-			pPacketData,
-			1,
-			0);
-		if (!pContiguousData)
-		{
-			status = STATUS_UNSUCCESSFUL;
-
-			TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
-				"NPF_NetworkClassify: NdisGetDataBuffer() [status: %#x]\n",
-				status);
-
-			goto Exit_Ethernet_Retreated;
-		}
-		else
-		{
-			if (g_DltNullMode)
+			bICMPProtocolUnreachable = NPF_IsICMPProtocolUnreachablePacket(pNetBufferList);
+			TRACE_MESSAGE1(PACKET_DEBUG_LOUD, "NPF_NetworkClassify: bICMPProtocolUnreachable = %d\n", bICMPProtocolUnreachable);
+			if (bICMPProtocolUnreachable)
 			{
-				((PDLT_NULL_HEADER) pContiguousData)->null_type = bIPv4 ? DLTNULLTYPE_IP : DLTNULLTYPE_IPV6;
-			}
-			else
-			{
-				RtlZeroMemory(pContiguousData, ETHER_ADDR_LEN * 2);
-				((PETHER_HEADER) pContiguousData)->ether_type = bIPv4 ? RtlUshortByteSwap(ETHERTYPE_IP) : RtlUshortByteSwap(ETHERTYPE_IPV6);
+				TRACE_MESSAGE(PACKET_DEBUG_LOUD,
+						"NPF_NetworkClassify: this packet is the ICMPv4 protocol unreachable error packet caused by our \"nping 127.0.0.1\" command, discard it\n");
+
+				goto Exit_Advance_Permit;
 			}
 		}
 
-		pNetBuffer = pNetBuffer->Next;
 	}
 
 	// Send the loopback packets data to the user-mode code.
-	// Can't assert this because a sleep could happen, detaching the adapter and making this pointer invalid.
-	//ASSERT(g_LoopbackOpenGroupHead);
-	if (g_LoopbackOpenGroupHead) {
+	pLoopbackFilter = NPF_GetLoopbackFilterModule();
+	if (pLoopbackFilter && NPF_StartUsingBinding(pLoopbackFilter)) {
+		status = FwpsAllocateCloneNetBufferList(pNetBufferList, NULL, NULL, 0, &pClonedNetBufferList);
+		if (status != STATUS_SUCCESS)
+		{
+			TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
+					"NPF_NetworkClassify: FwpsAllocateCloneNetBufferList() [status: %#x]\n",
+					status);
+
+			goto Exit_Advance_Permit;
+		}
+		if (bSelfSent)
+		{
+			// Strip off the IPPROTO_NPCAP_LOOPBACK header for pcap
+			NdisAdvanceNetBufferListDataStart(pClonedNetBufferList,
+					ipHeaderSize,
+					FALSE,
+					0);
+			bytesRetreated -= ipHeaderSize;
+		}
+
+
+		bytesRetreatedEthernet = g_DltNullMode ? DLT_NULL_HDR_LEN : ETHER_HDR_LEN;
+		status = NdisRetreatNetBufferListDataStart(pClonedNetBufferList,
+				bytesRetreatedEthernet,
+				0,
+				0,
+				0);
+		if (status != STATUS_SUCCESS)
+		{
+			bytesRetreatedEthernet = 0;
+
+			TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
+					"NPF_NetworkClassify: NdisRetreatNetBufferListDataStart(bytesRetreatedEthernet) [status: %#x]\n",
+					status);
+
+			NPF_StopUsingBinding(pLoopbackFilter);
+			goto Exit_Inject_Clone;
+		}
+
+		pNetBuffer = NET_BUFFER_LIST_FIRST_NB(pClonedNetBufferList);
+		while (pNetBuffer)
+		{
+			pContiguousData = NdisGetDataBuffer(pNetBuffer,
+					bytesRetreatedEthernet,
+					pPacketData,
+					1,
+					0);
+			if (!pContiguousData)
+			{
+				status = STATUS_UNSUCCESSFUL;
+
+				TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
+						"NPF_NetworkClassify: NdisGetDataBuffer() [status: %#x]\n",
+						status);
+
+				NPF_StopUsingBinding(pLoopbackFilter);
+				goto Exit_Inject_Clone;
+			}
+			else
+			{
+				if (g_DltNullMode)
+				{
+					((PDLT_NULL_HEADER) pContiguousData)->null_type = bIPv4 ? DLTNULLTYPE_IP : DLTNULLTYPE_IPV6;
+				}
+				else
+				{
+					RtlZeroMemory(pContiguousData, ETHER_ADDR_LEN * 2);
+					((PETHER_HEADER) pContiguousData)->ether_type = bIPv4 ? RtlUshortByteSwap(ETHERTYPE_IP) : RtlUshortByteSwap(ETHERTYPE_IPV6);
+				}
+			}
+
+			pNetBuffer = pNetBuffer->Next;
+		}
+
 
 		/* Lock the group */
-		NdisAcquireSpinLock(&g_LoopbackOpenGroupHead->GroupLock);
-		GroupOpen = g_LoopbackOpenGroupHead->GroupNext;
-		while (GroupOpen != NULL)
+		NdisAcquireSpinLock(&pLoopbackFilter->OpenInstancesLock);
+		for (Curr = pLoopbackFilter->OpenInstances.Next; Curr != NULL; Curr = Curr->Next)
 		{
-			TempOpen = GroupOpen;
-			if (TempOpen->AdapterBindingStatus == ADAPTER_BOUND)
+			TempOpen = CONTAINING_RECORD(Curr, OPEN_INSTANCE, OpenInstancesEntry);
+			if (TempOpen->OpenStatus == OpenRunning)
 			{
 				//let every group adapter receive the packets
 				NPF_TapExForEachOpen(TempOpen, pClonedNetBufferList);
 			}
-			GroupOpen = TempOpen->GroupNext;
 		}
-		NdisReleaseSpinLock(&g_LoopbackOpenGroupHead->GroupLock);
+		NdisReleaseSpinLock(&pLoopbackFilter->OpenInstancesLock);
+		NPF_StopUsingBinding(pLoopbackFilter);
 	}
 
-Exit_Ethernet_Retreated:
+	if (pClonedNetBufferList == NULL) {
+		// We never cloned this. Revert changes and permit.
+		goto Exit_Advance_Permit;
+	}
+	
+Exit_Inject_Clone:
 	// Advance the offset back to the original position.
 	NdisAdvanceNetBufferListDataStart(pClonedNetBufferList,
-		bytesRetreatedEthernet,
+		bytesRetreated + bytesRetreatedEthernet,
 		FALSE,
 		0);
 
-Exit_Packet_Cloned:
-	FwpsFreeCloneNetBufferList(pClonedNetBufferList, 0);
+	if (FWPS_IS_METADATA_FIELD_PRESENT(inMetaValues,
+				FWPS_METADATA_FIELD_COMPARTMENT_ID))
+		compartmentID = (COMPARTMENT_ID)inMetaValues->compartmentId;
 
-Exit_WSK_IP_Retreated:
-	if (bSelfSent)
+	// This cloned NBL will be freed in NPF_NetworkInjectionComplete function.
+	// Inbound packets that we didn't inject should be sent to receive stack.
+	if (bInbound && !bSelfSent) {
+		status = FwpsInjectNetworkReceiveAsync(bIPv4 ? g_InjectionHandle_IPv4 : g_InjectionHandle_IPv6,
+				NULL,
+				0,
+				compartmentID,
+				(IF_INDEX) inFixedValues->incomingValue[FWPS_FIELD_INBOUND_IPPACKET_V4_INTERFACE_INDEX].value.uint32,
+				(IF_INDEX) inFixedValues->incomingValue[FWPS_FIELD_INBOUND_IPPACKET_V4_SUB_INTERFACE_INDEX].value.uint32,
+				pClonedNetBufferList,
+				NPF_NetworkInjectionComplete,
+				NULL);
+	}
+	// Outbound packets and ones we injected should be sent to the send stack.
+	else
+       	{
+		status = FwpsInjectNetworkSendAsync(bIPv4 ? g_InjectionHandle_IPv4 : g_InjectionHandle_IPv6,
+				NULL,
+				0,
+				compartmentID,
+				pClonedNetBufferList,
+				NPF_NetworkInjectionComplete,
+				NULL);
+	}
+	if (status != STATUS_SUCCESS)
 	{
-		status = NdisRetreatNetBufferListDataStart(pNetBufferList,
-			bIPv4 ? IP_HDR_LEN : IPV6_HDR_LEN,
-			0,
-			NULL,
-			NULL);
+		TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
+				"NPF_NetworkClassify: FwpsInjectNetworkSendAsync() [status: %#x]\n",
+				status);
 
-// 		if (status != STATUS_SUCCESS)
-// 		{
-// 			TRACE_MESSAGE1(PACKET_DEBUG_LOUD,
-// 				"NPF_NetworkClassify: NdisRetreatNetBufferListDataStart(IP_HDR_LEN) [status: %#x]\n",
-// 				status);
-//
-// 			goto Exit_IP_Retreated;
-// 		}
+		FwpsFreeCloneNetBufferList(pClonedNetBufferList, 0);
+		// This isn't quite right: since we cloned the NBL,
+		// we're obligated to inject it; that didnt' work,
+		// though. We'll try to permit the original one
+		// instead.
+		goto Exit_Advance_Permit;
 	}
 
-/*Exit_IP_Retreated:*/
+	// We have successfully re-inject the cloned NBL, so remove this one.
+	classifyOut->actionType = FWP_ACTION_BLOCK;
+	classifyOut->flags |= FWPS_CLASSIFY_OUT_FLAG_ABSORB;
+	classifyOut->rights ^= FWPS_RIGHT_ACTION_WRITE;
+
+Exit_Advance_Permit:
 	NdisAdvanceNetBufferListDataStart(pNetBufferList,
 		bytesRetreated,
 		FALSE,
@@ -935,7 +927,7 @@ Callouts and filters will be removed during DriverUnload.
 		&session,
 		&g_WFPEngineHandle
 		);
-	if (!NT_SUCCESS(status))
+	if (!NT_SUCCESS(status) || !g_WFPEngineHandle || g_WFPEngineHandle == INVALID_HANDLE_VALUE)
 	{
 		goto Exit;
 	}
@@ -1026,12 +1018,12 @@ Exit:
 	if (!NT_SUCCESS(status))
 	{
 		IF_LOUD(DbgPrint("NPF_RegisterCallouts: failed to register callouts\n");)
-			if (inTransaction)
-			{
-				FwpmTransactionAbort(g_WFPEngineHandle);
-				_Analysis_assume_lock_not_held_(g_WFPEngineHandle); // Potential leak if "FwpmTransactionAbort" fails
-			}
-		if (engineOpened)
+		if (inTransaction && g_WFPEngineHandle && g_WFPEngineHandle != INVALID_HANDLE_VALUE)
+		{
+			FwpmTransactionAbort(g_WFPEngineHandle);
+			_Analysis_assume_lock_not_held_(g_WFPEngineHandle); // Potential leak if "FwpmTransactionAbort" fails
+		}
+		if (engineOpened && g_WFPEngineHandle != INVALID_HANDLE_VALUE)
 		{
 			FwpmEngineClose(g_WFPEngineHandle);
 			g_WFPEngineHandle = INVALID_HANDLE_VALUE;

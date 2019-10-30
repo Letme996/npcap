@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -87,11 +87,11 @@
 #define /*
  !define /**/ WINPCAP_MINOR				0
 #define /*
- !define /**/ WINPCAP_REV				99
+ !define /**/ WINPCAP_REV				9983
 #define /*
- !define /**/ WINPCAP_BUILD				302
+ !define /**/ WINPCAP_BUILD				909
 #define /*
- !define /**/ WINPCAP_VER_STRING		"0.99-r1"
+ !define /**/ WINPCAP_VER_STRING		"0.9983"
 
 #define WINPCAP_WPCAP_STRING_VERSION WINPCAP_VER_STRING
 
@@ -99,8 +99,16 @@
 
 #ifdef /*
  !ifdef /**/ NPCAP_OEM
+#ifdef /*
+ !ifdef /**/ NPCAP_READ_ONLY
+#define /*
+ !define /**/ WINPCAP_PRODUCT_NAME 			"Npcap OEM RO"
+#else /*
+ !else /**/
 #define /*
  !define /**/ WINPCAP_PRODUCT_NAME 			"Npcap OEM"
+#endif /*
+ !endif /**/
 #else /*
  !else /**/
 #define /*
@@ -108,10 +116,10 @@
 #endif /*
  !endif /**/
 
-#define WINPCAP_COPYRIGHT_STRING 		"Copyright (c) 2018, Insecure.Com LLC.  All rights reserved."
-#define WINPCAP_WANPACKET_COPYRIGHT_STRING "Copyright (c) 2018, Insecure.Com LLC.  All rights reserved."
-#define WINPCAP_INSTALLERHELPER_COPYRIGHT_STRING "Copyright (c) 2018, Insecure.Com LLC.  All rights reserved."
-#define WINPCAP_RPCAPD_COPYRIGHT_STRING "Copyright (c) 2018, Insecure.Com LLC.  All rights reserved."
+#define WINPCAP_COPYRIGHT_STRING 		"Copyright (c) 2019, Insecure.Com LLC.  All rights reserved."
+#define WINPCAP_WANPACKET_COPYRIGHT_STRING "Copyright (c) 2019, Insecure.Com LLC.  All rights reserved."
+#define WINPCAP_INSTALLERHELPER_COPYRIGHT_STRING "Copyright (c) 2019, Insecure.Com LLC.  All rights reserved."
+#define WINPCAP_RPCAPD_COPYRIGHT_STRING "Copyright (c) 2019, Insecure.Com LLC.  All rights reserved."
 
 #define WINPCAP_BUILD_DESCRIPTION 		""
 #define WINPCAP_PRIVATE_BUILD			""

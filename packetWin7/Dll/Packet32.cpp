@@ -5,7 +5,7 @@
  * reserved.                                                               *
  *                                                                         *
  * Even though Npcap source code is publicly available for review, it is   *
- * not open source software and my not be redistributed or incorporated    *
+ * not open source software and may not be redistributed or incorporated   *
  * into other software without special permission from the Nmap Project.   *
  * We fund the Npcap project by selling a commercial license which allows  *
  * companies to redistribute Npcap with their products and also provides   *
@@ -118,6 +118,7 @@ HANDLE g_hNpcapHelperPipe				=	INVALID_HANDLE_VALUE;	// Handle for NpcapHelper n
 HANDLE g_hDllHandle						=	NULL;					// The handle to this DLL.
 
 CHAR g_strLoopbackAdapterName[BUFSIZE]	= "";						// The name of "Npcap Loopback Adapter".
+#define NPCAP_LOOPBACK_ADAPTER_BUILTIN "NPF_Loopback"
 
 map<string, int> g_nbAdapterMonitorModes;							// The states for all the wireless adapters that show whether it is in the monitor mode.
 
@@ -399,7 +400,7 @@ HMODULE LoadLibrarySafe(LPCTSTR lpFileName)
 {
   TRACE_ENTER();
 
-  TCHAR path[MAX_PATH];
+  TCHAR path[MAX_PATH] = { 0 };
   TCHAR fullFileName[MAX_PATH];
   UINT res;
   HMODULE hModule = NULL;
@@ -407,7 +408,7 @@ HMODULE LoadLibrarySafe(LPCTSTR lpFileName)
   {
 	res = GetSystemDirectory(path, MAX_PATH);
 
-	if (res == 0 || !path)
+	if (res == 0)
 	{
 		//
 		// some bad failure occurred;
@@ -444,7 +445,7 @@ HMODULE LoadLibrarySafe(LPCTSTR lpFileName)
 }
 #endif
 
-BOOL NpcapCreatePipe(char *pipeName, HANDLE moduleName)
+BOOL NpcapCreatePipe(const char *pipeName, HANDLE moduleName)
 {
 	int pid = GetCurrentProcessId();
 	char params[BUFSIZE];
@@ -500,12 +501,13 @@ BOOL NpcapCreatePipe(char *pipeName, HANDLE moduleName)
 	else
 	{
 		TRACE_EXIT();
-		CloseHandle(shExInfo.hProcess);
+		if (shExInfo.hProcess)
+			CloseHandle(shExInfo.hProcess);
 		return TRUE;
 	}
 }
 
-HANDLE NpcapConnect(char *pipeName)
+HANDLE NpcapConnect(const char *pipeName)
 {
 	HANDLE hPipe = INVALID_HANDLE_VALUE;
 	int tryTime = 0;
@@ -545,9 +547,9 @@ HANDLE NpcapConnect(char *pipeName)
 	return hPipe;
 }
 
-HANDLE NpcapRequestHandle(char *sMsg, DWORD *pdwError)
+HANDLE NpcapRequestHandle(const char *sMsg, DWORD *pdwError)
 {
-	LPSTR lpvMessage = sMsg;
+	LPCSTR lpvMessage = sMsg;
 	char  chBuf[BUFSIZE];
 	BOOL   fSuccess = FALSE;
 	DWORD  cbRead, cbToWrite, cbWritten, dwMode;
@@ -810,11 +812,10 @@ void NpcapStopHelper()
 // find [substr] from a fixed-length buffer
 // [full_data] will be treated as binary data buffer)
 // return NULL if not found
-char* memstr(char* full_data, size_t full_data_len, char* substr)
+static const char* memstr(const char* full_data, size_t full_data_len, const char* substr)
 {
 	size_t sublen;
-	int i;
-	char* cur;
+	const char* cur;
 	size_t last_possible;
 
 	if (full_data == NULL || full_data_len <= 0 || substr == NULL)
@@ -831,7 +832,7 @@ char* memstr(char* full_data, size_t full_data_len, char* substr)
 
 	cur = full_data;
 	last_possible = full_data_len - sublen + 1;
-	for (i = 0; i < last_possible; i++)
+	for (size_t i = 0; i < last_possible; i++)
 	{
 		if (*cur == *substr)
 		{
@@ -849,12 +850,12 @@ char* memstr(char* full_data, size_t full_data_len, char* substr)
 }
 
 // For memory block [mem], substitute all [source] strings with [destination], return the new memory block (need to free), if not found, return NULL.
-PCHAR NpcapReplaceMemory(PCHAR buf, int buf_size, PCHAR source, PCHAR destination)
+PCHAR NpcapReplaceMemory(LPCSTR buf, int buf_size, LPCSTR source, LPCSTR destination)
 {
 	PCHAR tmp;
 	PCHAR newbuf;
 	PCHAR retbuf;
-	PCHAR sk;
+	LPCCH sk;
 	size_t size;
 
 	sk = memstr(buf, buf_size, source);
@@ -899,12 +900,12 @@ PCHAR NpcapReplaceMemory(PCHAR buf, int buf_size, PCHAR source, PCHAR destinatio
 }
 
 // For [string], substitute all [source] strings with [destination], return the new string (need to free), if not found, return NULL.
-PCHAR NpcapReplaceString(PCHAR string, PCHAR source, PCHAR destination)
+static PCHAR NpcapReplaceString(LPCSTR string, LPCSTR source, LPCSTR destination)
 {
 	PCHAR tmp;
 	PCHAR newstr;
 	PCHAR retstr;
-	PCHAR sk;
+	LPCCH sk;
 	size_t size;
 
 	sk = strstr(string, source);
@@ -951,32 +952,21 @@ PCHAR NpcapReplaceString(PCHAR string, PCHAR source, PCHAR destination)
 	return newstr;
 }
 
-PCHAR NpcapTranslateAdapterName_Standard2Wifi(PCHAR AdapterName)
+static PCHAR NpcapTranslateAdapterName_Standard2Wifi(LPCSTR AdapterName)
 {
 	TRACE_ENTER();
 	TRACE_EXIT();
-	return NpcapReplaceString(AdapterName, "_{", "_WIFI_{");
+	return NpcapReplaceString(AdapterName, "{", NPF_DEVICE_NAMES_TAG_WIFI "{");
 }
 
-PCHAR NpcapTranslateAdapterName_Npf2Npcap(PCHAR AdapterName)
+static PCHAR NpcapTranslateAdapterName_Npf2Npcap(LPCSTR AdapterName)
 {
-#ifdef NPF_NPCAP_RUN_IN_WINPCAP_MODE
-	UNREFERENCED_PARAMETER(AdapterName);
-	return NULL;
-#else
-	return NpcapReplaceString(AdapterName, "NPF", "NPCAP");
-#endif
+	return NpcapReplaceString(AdapterName, "NPF_", NPF_DEVICE_NAMES_PREFIX);
 }
 
-PCHAR NpcapTranslateMemory_Npcap2Npf(PCHAR pStr, int iBufSize)
+static PCHAR NpcapTranslateMemory_Npcap2Npf(LPCSTR pStr, int iBufSize)
 {
-#ifdef NPF_NPCAP_RUN_IN_WINPCAP_MODE
-	UNREFERENCED_PARAMETER(pStr);
-	UNREFERENCED_PARAMETER(iBufSize);
-	return NULL;
-#else
-	return NpcapReplaceMemory(pStr, iBufSize, "NPCAP", "NPF");
-#endif
+	return NpcapReplaceMemory(pStr, iBufSize, NPF_DEVICE_NAMES_PREFIX, "NPF_");
 }
 
 /*! 
@@ -1057,8 +1047,6 @@ BOOL APIENTRY DllMain(HANDLE DllHandle, DWORD Reason, LPVOID lpReserved)
 	case DLL_PROCESS_DETACH:
 
 		CloseHandle(g_AdaptersInfoMutex);
-		
-		g_AdaptersInfoList;
 		
 		while(g_AdaptersInfoList != NULL)
 		{
@@ -1609,6 +1597,7 @@ BOOLEAN PacketSetReadEvt(LPADAPTER AdapterObject)
 	return TRUE;
 }
 
+#ifdef NPCAP_PACKET_START_SERVICE
 /*! 
   \brief Installs the NPF device driver.
   \return If the function succeeds, the return value is nonzero.
@@ -1708,6 +1697,7 @@ BOOLEAN PacketInstallDriver60()
 	TRACE_EXIT();
 	return result;
 }
+#endif /* NPCAP_PACKET_START_SERVICE */
 
 /*! 
   \brief Dumps a registry key to disk in text format. Uses regedit.
@@ -1744,7 +1734,7 @@ LONG PacketDumpRegistryKey(PCHAR KeyName, PCHAR FileName)
 
   \note uses the GetFileVersionInfoSize() and GetFileVersionInfo() WIN32 API functions
 */
-BOOL PacketGetFileVersion(LPTSTR FileName, PCHAR VersionBuff, UINT VersionBuffLen)
+BOOL PacketGetFileVersion(LPCTSTR FileName, PCHAR VersionBuff, UINT VersionBuffLen)
 {
     DWORD   dwVerInfoSize;  // Size of version information block
     DWORD   dwVerHnd=0;   // An 'ignored' parameter, always '0'
@@ -1838,6 +1828,7 @@ BOOL PacketGetFileVersion(LPTSTR FileName, PCHAR VersionBuff, UINT VersionBuffLe
 	return TRUE;
 }
 
+#ifdef NPCAP_PACKET_START_SERVICE
 BOOL PacketStartService()
 {
 	DWORD error;
@@ -2059,6 +2050,7 @@ BOOL PacketStartService()
 	TRACE_EXIT();
 	return Result;
 }
+#endif /* NPCAP_PACKET_START_SERVICE */
 
 /*! 
   \brief Opens an adapter using the NPF device driver.
@@ -2068,7 +2060,7 @@ BOOL PacketStartService()
 
   \note internal function used by PacketOpenAdapter() and AddAdapter()
 */
-LPADAPTER PacketOpenAdapterNPF(PCHAR AdapterNameA)
+LPADAPTER PacketOpenAdapterNPF(LPCSTR AdapterNameA)
 {
 	DWORD error;
 	LPADAPTER lpAdapter;
@@ -2084,7 +2076,9 @@ LPADAPTER PacketOpenAdapterNPF(PCHAR AdapterNameA)
 	// Though don't bother if we already have a valid pipe to NpcapHelper
 	if (g_hNpcapHelperPipe == INVALID_HANDLE_VALUE)
 	{
+#ifdef NPCAP_PACKET_START_SERVICE
 		PacketStartService();
+#endif
 		if (NpcapIsAdminOnlyMode())
 		{
 			// NpcapHelper Initialization, used for accessing the driver with Administrator privilege.
@@ -2223,7 +2217,7 @@ LPADAPTER PacketOpenAdapterNPF(PCHAR AdapterNameA)
 }
 
 #ifdef HAVE_WANPACKET_API
-static LPADAPTER PacketOpenAdapterWanPacket(PCHAR AdapterName)
+static LPADAPTER PacketOpenAdapterWanPacket(LPCSTR AdapterName)
 {
 	LPADAPTER lpAdapter = NULL;
 	DWORD dwLastError = ERROR_SUCCESS;
@@ -2294,7 +2288,7 @@ static LPADAPTER PacketOpenAdapterWanPacket(PCHAR AdapterName)
   \note internal function used by PacketOpenAdapter()
 */
 #ifdef HAVE_AIRPCAP_API
-static LPADAPTER PacketOpenAdapterAirpcap(PCHAR AdapterName)
+static LPADAPTER PacketOpenAdapterAirpcap(LPCSTR AdapterName)
 {
 	CHAR Ebuf[AIRPCAP_ERRBUF_SIZE];
     LPADAPTER lpAdapter;
@@ -2344,7 +2338,7 @@ static LPADAPTER PacketOpenAdapterAirpcap(PCHAR AdapterName)
 
 
 #ifdef HAVE_NPFIM_API
-static LPADAPTER PacketOpenAdapterNpfIm(PCHAR AdapterName)
+static LPADAPTER PacketOpenAdapterNpfIm(LPCSTR AdapterName)
 {
     LPADAPTER lpAdapter;
 
@@ -2391,7 +2385,7 @@ static LPADAPTER PacketOpenAdapterNpfIm(PCHAR AdapterName)
   \note internal function used by PacketOpenAdapter()
 */
 #ifdef HAVE_DAG_API
-static LPADAPTER PacketOpenAdapterDAG(PCHAR AdapterName, BOOLEAN IsAFile)
+static LPADAPTER PacketOpenAdapterDAG(LPCSTR AdapterName, BOOLEAN IsAFile)
 {
 	CHAR DagEbuf[DAGC_ERRBUF_SIZE];
     LPADAPTER lpAdapter;
@@ -2518,7 +2512,7 @@ static LPADAPTER PacketOpenAdapterDAG(PCHAR AdapterName, BOOLEAN IsAFile)
   \brief Return a string with the dll version.
   \return A char pointer to the version of the library.
 */
-PCHAR PacketGetVersion()
+LPCSTR PacketGetVersion()
 {
 	TRACE_ENTER();
 	TRACE_EXIT();
@@ -2529,7 +2523,7 @@ PCHAR PacketGetVersion()
   \brief Return a string with the version of the device driver.
   \return A char pointer to the version of the driver.
 */
-PCHAR PacketGetDriverVersion()
+LPCSTR PacketGetDriverVersion()
 {
 	TRACE_ENTER();
 	TRACE_EXIT();
@@ -2540,7 +2534,7 @@ PCHAR PacketGetDriverVersion()
 \brief Return a string with the name of the device driver.
 \return A char pointer to the version of the driver.
 */
-PCHAR PacketGetDriverName()
+LPCSTR PacketGetDriverName()
 {
 	TRACE_ENTER();
 	TRACE_EXIT();
@@ -2644,7 +2638,7 @@ LPADAPTER PacketOpenAdapter(PCHAR AdapterNameWA)
 {
     LPADAPTER lpAdapter = NULL;
 	PCHAR AdapterNameA = NULL;
-	PCHAR TranslatedAdapterNameWA = NULL;
+	PCHAR TranslatedAdapterNameA = NULL;
 	BOOL bFreeAdapterNameA;
 #ifndef _WINNT4
 	PADAPTER_INFO TAdInfo;
@@ -2657,13 +2651,6 @@ LPADAPTER PacketOpenAdapter(PCHAR AdapterNameWA)
 	TRACE_PRINT_OS_INFO();
 	
 	TRACE_PRINT2("Packet DLL version %hs, Driver version %hs", PacketLibraryVersion, PacketDriverVersion);
-
-	// Translate the adapter name string's "NPF_{XXX}" to "NPCAP_{XXX}" for compatibility with WinPcap, because some user softwares hard-coded the "NPF_" string
-	TranslatedAdapterNameWA = NpcapTranslateAdapterName_Npf2Npcap(AdapterNameWA);
-	if (TranslatedAdapterNameWA)
-	{
-		AdapterNameWA = TranslatedAdapterNameWA;
-	}
 
 	//
 	// Check the presence on some libraries we rely on, and load them if we found them
@@ -2693,13 +2680,22 @@ LPADAPTER PacketOpenAdapter(PCHAR AdapterNameWA)
 		if (AdapterNameA == NULL)
 		{
 			SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-			if (TranslatedAdapterNameWA)
-				free(TranslatedAdapterNameWA);
 			return NULL;
 		}
 
 		StringCchPrintfA(AdapterNameA, bufferSize, "%ws", (PWCHAR)AdapterNameWA);
 		bFreeAdapterNameA = TRUE;
+	}
+
+	// Translate the adapter name string's "NPF_{XXX}" to "NPCAP_{XXX}" for compatibility with WinPcap, because some user softwares hard-coded the "NPF_" string
+	TranslatedAdapterNameA = NpcapTranslateAdapterName_Npf2Npcap(AdapterNameA);
+	if (TranslatedAdapterNameA)
+	{
+        if (bFreeAdapterNameA) {
+            GlobalFree(AdapterNameA);
+            bFreeAdapterNameA = FALSE;
+        }
+		AdapterNameA = TranslatedAdapterNameA;
 	}
 
 #ifndef _WINNT4
@@ -2910,16 +2906,16 @@ LPADAPTER PacketOpenAdapter(PCHAR AdapterNameWA)
 	{
 		TRACE_EXIT();
 		SetLastError(dwLastError);
-		if (TranslatedAdapterNameWA)
-			free(TranslatedAdapterNameWA);
+		if (TranslatedAdapterNameA)
+			free(TranslatedAdapterNameA);
 
 		return NULL;
 	}
 	else
 	{
 		TRACE_EXIT();
-		if (TranslatedAdapterNameWA)
-			free(TranslatedAdapterNameWA);
+		if (TranslatedAdapterNameA)
+			free(TranslatedAdapterNameA);
 
 		return lpAdapter;
 	}
@@ -3416,6 +3412,7 @@ INT PacketSendPackets(LPADAPTER AdapterObject, PVOID PacketBuff, ULONG Size, BOO
 	else
 	{
 		TRACE_PRINT1("Request to write on an unknown device type (%u)", AdapterObject->Flags);
+		SetLastError(ERROR_BAD_DEV_TYPE);
 		TotBytesTransfered = 0;
 	}
 
@@ -4863,9 +4860,18 @@ BOOLEAN PacketIsLoopbackAdapter(PCHAR AdapterName)
 
 	TRACE_ENTER();
 
-	// Set the return value to TRUE for "Npcap Loopback Adapter".
-	if (strcmp(g_strLoopbackAdapterName + sizeof(DEVICE_PREFIX) - 1,
-		AdapterName + sizeof(DEVICE_PREFIX) - 1 + sizeof(NPF_DEVICE_NAMES_PREFIX) - 1) == 0)
+	if (strlen(AdapterName) < sizeof(DEVICE_PREFIX)) {
+		// The adapter name is too short.
+		ret = FALSE;
+	}
+	// Compare to NPF_Loopback
+	else if (strcmp(AdapterName + sizeof(DEVICE_PREFIX) - 1, NPCAP_LOOPBACK_ADAPTER_BUILTIN) == 0 ||
+			// or compare to value in Registry, if it's found and long enough.
+			(strlen(g_strLoopbackAdapterName) > sizeof(DEVICE_PREFIX) &&
+			 strlen(AdapterName) > sizeof(DEVICE_PREFIX) - 1 + sizeof(NPF_DEVICE_NAMES_PREFIX) &&
+			 strcmp(g_strLoopbackAdapterName + sizeof(DEVICE_PREFIX) - 1,
+				 AdapterName + sizeof(DEVICE_PREFIX) - 1 + sizeof(NPF_DEVICE_NAMES_PREFIX) - 1) == 0)
+	   )
 	{
 		ret = TRUE;
 	}
